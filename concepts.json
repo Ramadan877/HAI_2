@@ -1,0 +1,16 @@
+{
+    "concepts": [
+        {
+            "name": "Correlation",
+            "golden_answer": "Correlation describes the strength and direction of a relationship between two variables, ranging from -1 to 1. A value close to 1 indicates a strong positive relationship, while a value close to -1 indicates a strong negative one. Importantly, correlation does not imply causation. It only shows that two variables change together. A third variable may influence both, which is why identifying extraneous variables is essential."
+        },
+        {
+            "name": "Confounders",
+            "golden_answer": "A confounder is a variable that is related to both the independent and dependent variables and can create a false impression of a relationship between them. It can make it seem like X causes Y, when in reality the confounder might be responsible for the effect. For example, physical activity may influence both the likelihood of following a diet and the amount of weight lost."
+        },
+        {
+            "name": "Moderators",
+            "golden_answer": "A moderator affects the strength or direction of the relationship between an independent and a dependent variable. It helps researchers understand under what conditions or for whom an effect occurs. For instance, stress may change how effective a diet is in producing weight loss by altering eating habits or metabolism. Identifying moderators can provide more nuanced insights into how variables interact."
+        }
+    ]
+}

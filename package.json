@@ -1,0 +1,23 @@
+{
+  "name": "v2",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ramadan877/Human_AI_Voice_Interaction_V2.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/Ramadan877/Human_AI_Voice_Interaction_V2/issues"
+  },
+  "homepage": "https://github.com/Ramadan877/Human_AI_Voice_Interaction_V2#readme",
+  "description": "",
+  "dependencies": {
+    "package.json": "^2.0.1"
+  }
+}

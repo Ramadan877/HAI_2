@@ -1,0 +1,349 @@
+body {
+    display: flex;
+    font-family: Arial, sans-serif;
+    margin: 0;
+    padding: 0;
+    background-color: #1e293b;
+    color: #ffffff;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    overflow: hidden;
+}
+.container {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    position: relative;
+}
+#pdf-container {
+    width: 100%;
+    height: 100vh;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    overflow: hidden;
+    position: absolute;
+    top: 0;
+    left: 0;
+    z-index: 0;
+}
+#pdf-canvas {
+    max-width: 100%;
+    max-height: 100vh;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
+    object-fit: contain;
+}
+.page-controls {
+    position: fixed;
+    bottom: 20px;
+    display: flex;
+    justify-content: center;
+    gap: 20px;
+    z-index: 100;
+    width: 100%;
+    left: 0;
+}
+.page-btn {
+    background-color: rgba(0, 0, 0, 0.7);
+    color: white;
+    border: none;
+    border-radius: 50%;
+    width: 40px;
+    height: 40px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    cursor: pointer;
+    transition: background-color 0.3s;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
+}
+.page-btn:hover {
+    background-color: rgba(0, 0, 0, 0.9);
+}
+.page-counter {
+    background-color: rgba(0, 0, 0, 0.7);
+    padding: 10px 15px;
+    border-radius: 20px;
+    display: flex;
+    align-items: center;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
+}
+.avatar-container {
+    position: fixed;
+    right: 20px;
+    bottom: 20px;
+    width: 150px;
+    height: 150px;
+    cursor: pointer;
+    transition: transform 0.3s ease;
+    z-index: 1000;
+}
+.avatar-container:hover {
+    transform: scale(1.1);
+}
+.concept-indicator {
+    position: fixed;
+    right: 50px;
+    bottom: 180px;
+    background: linear-gradient(135deg, #00e5ff, #7c4dff);
+    padding: 12px 18px;
+    border-radius: 20px;
+    color: white;
+    font-size: 16px;
+    max-width: 250px;
+    transform-origin: bottom center;
+    transform: scale(0);
+    opacity: 0;
+    transition: transform 0.3s ease, opacity 0.3s ease;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    z-index: 999;
+}
+.concept-indicator.show {
+    transform: scale(1);
+    opacity: 1;
+}
+.concept-indicator::after {
+    content: '';
+    position: absolute;
+    bottom: -9px;
+    right: 20px;
+    width: 0;
+    height: 0;
+    border-left: 10px solid transparent;
+    border-right: 10px solid transparent;
+    border-top: 10px solid #7c4dff;
+}
+/* Siri Sphere Animation Styles */
+.siri-orb {
+    position: absolute;
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    background: radial-gradient(circle at center, rgba(0, 0, 0, 0.8) 0%, rgba(0, 0, 0, 0.1) 60%, rgba(255,255,255,0) 70%);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    transition: transform 0.3s ease;
+}
+.blob {
+    position: absolute;
+    border-radius: 50%;
+    filter: blur(10px);
+    opacity: 0.7;
+    mix-blend-mode: screen;
+    transform-origin: center;
+    transition: all 0.5s ease;
+}
+.blob1 {
+    width: 75px;
+    height: 75px;
+    background-color: #00e5ff;
+    left: calc(50% - 37.5px);
+    top: calc(50% - 50px);
+}
+.blob2 {
+    width: 80px;
+    height: 80px;
+    background-color: #ff3366;
+    left: calc(50% - 40px);
+    top: calc(50% - 20px);
+}
+.blob3 {
+    width: 70px;
+    height: 70px;
+    background-color: #7c4dff;
+    left: calc(50% - 20px);
+    top: calc(50% - 35px);
+}
+.wave {
+    position: absolute;
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    background: transparent;
+    border: 2px solid rgba(0, 0, 0, 0.5);
+    transform: scale(0);
+    opacity: 1;
+    pointer-events: none;
+}
+.loading-spinner {
+    border: 4px solid rgba(255, 255, 255, 0.3);
+    border-radius: 50%;
+    border-top: 4px solid #ffffff;
+    width: 40px;
+    height: 40px;
+    animation: spin 1s linear infinite;
+}
+/* Orbiting Meteor Styles */
+.meteor {
+    position: absolute;
+    width: 20px;
+    height: 20px;
+    background: linear-gradient(135deg, #00e5ff, #7c4dff);
+    border-radius: 50%;
+    filter: blur(2px);
+    box-shadow: 0 0 15px 5px rgba(0, 229, 255, 0.8), 0 0 25px 8px rgba(0, 229, 255, 0.4);
+    opacity: 0;
+    transform-origin: center center;
+    z-index: 1001;
+}
+.meteor-trail {
+    position: absolute;
+    width: 20px;
+    height: 4px;
+    background: linear-gradient(to left, rgba(255, 255, 255, 0.8), rgba(255, 255, 255, 0));
+    border-radius: 2px;
+    filter: blur(1px);
+    transform-origin: right center;
+    transform: scaleX(0);
+    opacity: 0;
+    z-index: 1000;
+}
+.start-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0, 0, 0, 0.7);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    z-index: 2000;
+    transition: opacity 0.5s ease;
+}
+.start-trial-selector {
+    background-color: rgba(0, 0, 0, 0.7);
+    border-radius: 10px;
+    padding: 25px;
+    box-shadow: 0 0 30px rgba(255, 255, 255, 0.3);
+    text-align: center;
+    max-width: 400px;
+    width: 100%;
+}
+.start-trial-title {
+    color: white;
+    font-size: 24px;
+    margin-bottom: 20px;
+    font-weight: 300;
+}
+.start-trial-buttons {
+    display: flex;
+    gap: 15px;
+    justify-content: center;
+    margin-bottom: 15px;
+}
+.start-trial-btn {
+    padding: 12px 25px;
+    background-color: rgba(255, 255, 255, 0.1);
+    color: white;
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    font-size: 16px;
+}
+.start-trial-btn:hover {
+    background-color: rgba(255, 255, 255, 0.2);
+    transform: translateY(-2px);
+    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+}
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+@keyframes orbit {
+    0% { transform: rotate(0deg) translateX(90px) rotate(0deg); }
+    100% { transform: rotate(360deg) translateX(90px) rotate(-360deg); }
+}
+@keyframes fadeIn {
+    0% { opacity: 0; }
+    100% { opacity: 1; }
+}
+@keyframes trail {
+    0% { transform: scaleX(0); opacity: 0; }
+    50% { transform: scaleX(1); opacity: 0.8; }
+    100% { transform: scaleX(0); opacity: 0; }
+}
+.trial-indicators {
+    position: fixed;
+    top: 10px;
+    right: 10px;
+    display: flex;
+    gap: 10px;
+}
+.trial-indicator {
+    padding: 5px 10px;
+    border-radius: 4px;
+    background-color: #eee;
+    opacity: 0.5;
+}
+.trial-indicator.active {
+    background-color: #4CAF50;
+    color: white;
+    opacity: 1;
+}
+.participant-id-container {
+    margin-bottom: 20px;
+    text-align: left;
+    padding: 0 20px;
+}
+.participant-id-input {
+    width: 100%;
+    padding: 10px;
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    border-radius: 4px;
+    background-color: rgba(255, 255, 255, 0.1);
+    color: white;
+    font-size: 16px;
+    transition: all 0.3s ease;
+}
+.participant-id-input:focus {
+    outline: none;
+    border-color: rgba(255, 255, 255, 0.5);
+    background-color: rgba(255, 255, 255, 0.2);
+}
+.ready-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0, 0, 0, 0.8);
+    display: none;
+    justify-content: center;
+    align-items: center;
+    z-index: 1000;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+}
+.ready-overlay.show {
+    display: flex;
+    opacity: 1;
+}
+.ready-content {
+    text-align: center;
+}
+.start-interaction-btn {
+    background-color: #4fd1c5;
+    color: white;
+    border: none;
+    padding: 2rem 4rem;
+    border-radius: 50px;
+    font-size: 2rem;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    box-shadow: 0 4px 15px rgba(79, 209, 197, 0.3);
+}
+.start-interaction-btn:hover {
+    background-color: #38b2ac;
+    transform: scale(1.05);
+    box-shadow: 0 6px 20px rgba(79, 209, 197, 0.4);
+}
+.start-interaction-btn:active {
+    transform: scale(0.95);
+}
