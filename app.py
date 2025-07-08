@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 
 
-OPENAI_API_KEY = "openai_api_key_here"
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 client = openai.OpenAI(
     api_key=OPENAI_API_KEY,
     base_url="https://api.openai.com/v1"
