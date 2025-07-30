@@ -8,15 +8,12 @@ from gtts import gTTS
 import whisper
 import warnings
 warnings.filterwarnings("ignore", category=SyntaxWarning)
-# Handle pydub audioop compatibility for Python 3.13
 try:
     from pydub import AudioSegment
 except ImportError as e:
-    # Fallback for missing audioop in Python 3.13
     import warnings
     warnings.filterwarnings("ignore")
     
-    # Mock AudioSegment for basic functionality
     class MockAudioSegment:
         @classmethod
         def empty(cls):
