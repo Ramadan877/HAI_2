@@ -5,9 +5,9 @@ openai==1.35.0
 gTTS==2.4.0
 whisper==1.1.10
 pydub==0.25.1
-torch==2.0.0
-torchaudio==2.0.1
-numpy==1.24.3
+torch>=2.5.0
+torchaudio>=2.5.0
+numpy>=1.24.3
 python-dateutil==2.9.0.post0
 psycopg2-binary==2.9.7
 sqlalchemy==2.0.21
