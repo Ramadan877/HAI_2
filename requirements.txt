@@ -5,6 +5,7 @@ openai==1.35.0
 gTTS==2.4.0
 whisper==1.1.10
 pydub==0.25.1
+pyaudioop==1.0.2
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.7.1
 torchaudio==2.7.1+cpu
