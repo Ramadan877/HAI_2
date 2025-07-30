@@ -295,9 +295,7 @@ def get_participant_folder(participant_id, trial_type):
 
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-client = openai.OpenAI(
-    api_key=OPENAI_API_KEY
-)
+openai.api_key = OPENAI_API_KEY
 
 app = Flask(__name__)
 
@@ -394,11 +392,11 @@ def speech_to_text(audio_file_path):
             return "Audio file not found"
             
         with open(audio_file_path, "rb") as audio_file:
-            transcript = client.audio.transcriptions.create(
+            transcript = openai.Audio.transcribe(
                 model="whisper-1",
                 file=audio_file
             )
-            return transcript.text
+            return transcript["text"]
     except Exception as e:
         print(f"Error using OpenAI Whisper API: {str(e)}")
         print("Falling back to local Whisper model...")
@@ -960,7 +958,7 @@ def generate_response(user_message, concept_name, golden_answer, attempt_count):
         user_prompt += "\nLet the user know they have completed three self-explanation attempts. Instruct them to stop here and tell them to continue with the next concept."
 
     try:
-        response = client.chat.completions.create(
+        response = openai.ChatCompletion.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": base_prompt},
