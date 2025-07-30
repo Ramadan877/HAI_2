@@ -293,8 +293,7 @@ def get_participant_folder(participant_id, trial_type):
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 client = openai.OpenAI(
-    api_key=OPENAI_API_KEY,
-    base_url="https://api.openai.com/v1"
+    api_key=OPENAI_API_KEY
 )
 
 app = Flask(__name__)
