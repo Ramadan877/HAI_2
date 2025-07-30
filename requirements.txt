@@ -1,0 +1,17 @@
+Flask==2.3.3
+flask-cors==4.0.0
+Werkzeug==2.3.7
+openai==1.35.0
+gTTS==2.4.0
+whisper==1.1.10
+pydub==0.25.1
+torch==2.0.0
+torchaudio==2.0.1
+numpy==1.24.3
+python-dateutil==2.9.0.post0
+psycopg2-binary==2.9.7
+sqlalchemy==2.0.21
+flask-sqlalchemy==3.0.5
+boto3==1.28.57
+python-dotenv==1.0.0
+gunicorn==21.2.0

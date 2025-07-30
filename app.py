@@ -15,7 +15,253 @@ import threading
 from functools import lru_cache
 from functools import wraps
 from concurrent.futures import ThreadPoolExecutor
+import boto3
+from dotenv import load_dotenv
+from database import db, Participant, Session, Interaction, Recording, UserEvent
+import uuid
 
+load_dotenv()
+
+
+def upload_to_s3(file_path, s3_key):
+    """Upload file to S3 and return the URL."""
+    try:
+        if not s3_client or not BUCKET_NAME:
+            print("S3 not configured, skipping upload")
+            return None
+            
+        s3_client.upload_file(file_path, BUCKET_NAME, s3_key)
+        return f"https://{BUCKET_NAME}.s3.{os.environ.get('AWS_REGION')}.amazonaws.com/{s3_key}"
+    except Exception as e:
+        print(f"Error uploading to S3: {str(e)}")
+        return None
+
+def save_interaction_to_db(session_id, speaker, concept_name, message, attempt_number=1):
+    """Save interaction to database."""
+    try:
+        if not db or not app.config.get('SQLALCHEMY_DATABASE_URI'):
+            print("Database not configured, skipping interaction save")
+            return
+            
+        interaction = Interaction(
+            session_id=session_id,
+            speaker=speaker,
+            concept_name=concept_name,
+            message=message,
+            attempt_number=attempt_number
+        )
+        db.session.add(interaction)
+        db.session.commit()
+    except Exception as e:
+        print(f"Error saving interaction: {str(e)}")
+        try:
+            db.session.rollback()
+        except:
+            pass
+
+def save_recording_to_db(session_id, recording_type, file_path, original_filename, 
+                        file_size, concept_name=None, attempt_number=None):
+    """Save recording metadata to database."""
+    try:
+        if not db or not app.config.get('SQLALCHEMY_DATABASE_URI'):
+            print("Database not configured, skipping recording save")
+            return None
+            
+        recording = Recording(
+            session_id=session_id,
+            recording_type=recording_type,
+            file_path=file_path,
+            original_filename=original_filename,
+            file_size=file_size,
+            concept_name=concept_name,
+            attempt_number=attempt_number
+        )
+        db.session.add(recording)
+        db.session.commit()
+        return recording.id
+    except Exception as e:
+        print(f"Error saving recording: {str(e)}")
+        try:
+            db.session.rollback()
+        except:
+            pass
+        return None
+
+def create_session_record(participant_id, trial_type, version):
+    """Create a new session record."""
+    try:
+        if not db or not app.config.get('SQLALCHEMY_DATABASE_URI'):
+            print("Database not configured, skipping session creation")
+            return None
+            
+        participant = Participant.query.filter_by(participant_id=participant_id).first()
+        if not participant:
+            participant = Participant(participant_id=participant_id)
+            db.session.add(participant)
+        
+        session_id = f"{participant_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
+        session_record = Session(
+            session_id=session_id,
+            participant_id=participant_id,
+            trial_type=trial_type,
+            version=version
+        )
+        db.session.add(session_record)
+        db.session.commit()
+        return session_id
+    except Exception as e:
+        print(f"Error creating session: {str(e)}")
+        try:
+            db.session.rollback()
+        except:
+            pass
+        return None
+
+
+def save_audio_with_cloud_backup(audio_data, filename, session_id, recording_type, concept_name=None, attempt_number=None):
+    """Save audio locally and backup to cloud storage."""
+    try:
+        local_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        
+        if hasattr(audio_data, 'save'):
+            audio_data.save(local_path)
+        else:
+            with open(local_path, 'wb') as f:
+                f.write(audio_data)
+        
+        cloud_url = None
+        try:
+            s3_key = f"recordings/{session_id}/{filename}"
+            cloud_url = upload_to_s3(local_path, s3_key)
+        except Exception as s3_error:
+            print(f"S3 upload failed, continuing without cloud backup: {str(s3_error)}")
+        
+
+        try:
+            if cloud_url:
+                file_size = os.path.getsize(local_path) if os.path.exists(local_path) else 0
+                save_recording_to_db(
+                    session_id=session_id,
+                    recording_type=recording_type,
+                    file_path=cloud_url,
+                    original_filename=filename,
+                    file_size=file_size,
+                    concept_name=concept_name,
+                    attempt_number=attempt_number
+                )
+        except Exception as db_error:
+            print(f"Database recording save failed, continuing: {str(db_error)}")
+        
+        return local_path, cloud_url
+    except Exception as e:
+        print(f"Error in save_audio_with_cloud_backup: {str(e)}")
+        return None, None
+
+def log_interaction_to_db_only(speaker, concept_name, message, attempt_number=1):
+    """Log interaction to database only - separate from file logging."""
+    try:
+        session_id = session.get('session_id')
+        if session_id:
+            save_interaction_to_db(session_id, speaker, concept_name, message, attempt_number)
+        else:
+            print("Warning: No session_id found for database logging")
+    except Exception as e:
+        print(f"Error logging interaction to database: {str(e)}")
+
+def backup_existing_files_to_cloud():
+    """Backup existing local files to cloud storage - can be called periodically."""
+    try:
+        participant_id = session.get('participant_id')
+        trial_type = session.get('trial_type')
+        session_id = session.get('session_id')
+        
+        if not all([participant_id, trial_type, session_id]):
+            return False
+            
+        folders = get_participant_folder(participant_id, trial_type)
+        participant_folder = folders['participant_folder']
+        
+        for filename in os.listdir(participant_folder):
+            if filename.endswith(('.mp3', '.wav', '.webm')):
+                local_path = os.path.join(participant_folder, filename)
+                s3_key = f"recordings/{session_id}/{filename}"
+                cloud_url = upload_to_s3(local_path, s3_key)
+                
+                if cloud_url:
+                    recording_type = 'audio'
+                    if 'user_' in filename:
+                        recording_type = 'user_audio'
+                    elif 'ai_' in filename:
+                        recording_type = 'ai_audio'
+                    elif 'screen_recording' in filename:
+                        recording_type = 'screen'
+                    
+                    file_size = os.path.getsize(local_path)
+                    save_recording_to_db(
+                        session_id=session_id,
+                        recording_type=recording_type,
+                        file_path=cloud_url,
+                        original_filename=filename,
+                        file_size=file_size
+                    )
+        
+        screen_folder = folders['screen_recordings_folder']
+        if os.path.exists(screen_folder):
+            for filename in os.listdir(screen_folder):
+                if filename.endswith('.webm'):
+                    local_path = os.path.join(screen_folder, filename)
+                    s3_key = f"screen_recordings/{session_id}/{filename}"
+                    cloud_url = upload_to_s3(local_path, s3_key)
+                    
+                    if cloud_url:
+                        file_size = os.path.getsize(local_path)
+                        save_recording_to_db(
+                            session_id=session_id,
+                            recording_type='screen',
+                            file_path=cloud_url,
+                            original_filename=filename,
+                            file_size=file_size
+                        )
+        
+        return True
+    except Exception as e:
+        print(f"Error backing up files to cloud: {str(e)}")
+        return False
+
+def initialize_session_in_db():
+    """Initialize session in database when user starts - call this in set_trial_type."""
+    try:
+        participant_id = session.get('participant_id')
+        trial_type = session.get('trial_type')
+        
+        if participant_id and trial_type:
+            session_id = create_session_record(participant_id, trial_type, "V2")
+            if session_id:
+                session['session_id'] = session_id
+                return session_id
+    except Exception as e:
+        print(f"Error initializing session in database: {str(e)}")
+    return None
+
+def get_participant_folder(participant_id, trial_type):
+    """Get or create the participant's folder structure."""
+    trial_folder_map = {
+        'Trial_1': 'main_task_1',
+        'Trial_2': 'main_task_2', 
+        'Test': 'test_task'
+    }
+    
+    trial_folder_name = trial_folder_map.get(trial_type, trial_type.lower())
+    participant_folder = os.path.join(USER_DATA_BASE_FOLDER, str(participant_id), trial_folder_name)
+    screen_recordings_folder = os.path.join(participant_folder, 'Screen Recordings')
+
+    os.makedirs(participant_folder, exist_ok=True)
+    os.makedirs(screen_recordings_folder, exist_ok=True)
+
+    return {
+        'participant_folder': participant_folder,
+        'screen_recordings_folder': screen_recordings_folder
+    }
 
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
@@ -25,7 +271,25 @@ client = openai.OpenAI(
 )
 
 app = Flask(__name__)
-app.secret_key = 'supersecretkey'
+
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY')
+app.secret_key = os.environ.get('SECRET_KEY', 'fallback-secret-key')
+
+db.init_app(app)
+
+s3_client = boto3.client(
+    's3',
+    aws_access_key_id=os.environ.get('AWS_ACCESS_KEY_ID'),
+    aws_secret_access_key=os.environ.get('AWS_SECRET_ACCESS_KEY'),
+    region_name=os.environ.get('AWS_REGION')
+)
+
+BUCKET_NAME = os.environ.get('CLOUD_STORAGE_BUCKET')
+
+with app.app_context():
+    db.create_all()
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 UPLOAD_FOLDER = os.path.normpath(os.path.join(BASE_DIR, 'uploads'))
@@ -585,11 +849,37 @@ def submit_message():
     print(f"AI Response: {ai_response}") 
 
     log_interaction("AI", concept_name, ai_response)
+    
+    try:
+        log_interaction_to_db_only("USER", concept_name, user_message, current_attempt_count + 1)
+        log_interaction_to_db_only("AI", concept_name, ai_response, current_attempt_count + 1)
+    except Exception as e:
+        print(f"Database logging failed, but continuing: {str(e)}")
 
     task_folder = create_user_folders(participant_id, trial_type)
     ai_response_filename = get_audio_filename('AI', participant_id, trial_type, current_attempt_count + 1)
     audio_response_path = os.path.join(task_folder, ai_response_filename)
     generate_audio(ai_response, audio_response_path)
+    
+    try:
+        session_id = session.get('session_id')
+        if session_id and audio_file and os.path.exists(audio_path):
+            with open(audio_path, 'rb') as f:
+                audio_data = f.read()
+            save_audio_with_cloud_backup(
+                audio_data, user_audio_filename, session_id, 
+                'user_audio', concept_name, current_attempt_count + 1
+            )
+            
+        if session_id and os.path.exists(audio_response_path):
+            with open(audio_response_path, 'rb') as f:
+                ai_audio_data = f.read()
+            save_audio_with_cloud_backup(
+                ai_audio_data, ai_response_filename, session_id, 
+                'ai_audio', concept_name, current_attempt_count + 1
+            )
+    except Exception as e:
+        print(f"Cloud backup failed, but continuing: {str(e)}")
 
     if not os.path.exists(audio_response_path):
         print("Error: AI audio file not created!")  
@@ -690,80 +980,56 @@ def serve_pdf():
     """Serve the PDF file for the current concept."""
     return send_from_directory('resources', 'Extraneous Variables.pdf')
 
+
+
 @app.route('/set_trial_type', methods=['POST'])
 def set_trial_type():
     """Set the trial type and participant ID for the session."""
     try:
         data = request.get_json()
-        print("Received data:", data)  # Debug print
-        
-        trial_type = data.get('trial_type', 'Trial_1')
-        participant_id = data.get('participant_id')
+        trial_type = data.get('trial_type')
+        participant_id = data.get('participant_id')        
 
-        if not participant_id:
-            print("Missing participant ID")  # Debug print
+        if not trial_type or not participant_id:
             return jsonify({
-                "error": "Participant ID is required",
-                "received_data": data
+                'status': 'error',
+                'message': 'Missing trial type or participant ID'
             }), 400
 
         valid_types = ["Trial_1", "Trial_2", "Test"]
         if trial_type not in valid_types:
-            print(f"Invalid trial type: {trial_type}")  # Debug print
+            print(f"Invalid trial type: {trial_type}")
             return jsonify({
                 "error": "Invalid trial type",
                 "received_data": data
             }), 400
-
+        
         old_trial_type = session.get('trial_type', 'None')
 
-        try:
-            trial_folder_map = {
-                'Trial_1': 'main_task_1',
-                'Trial_2': 'main_task_2',
-                'Test': 'test_task'
-            }
-            trial_folder_name = trial_folder_map.get(trial_type, trial_type.lower())
-            
-            participant_folder = os.path.normpath(os.path.join(USER_DATA_BASE_FOLDER, str(participant_id)))
-            task_folder = os.path.normpath(os.path.join(participant_folder, trial_folder_name))
-            
-            os.makedirs(participant_folder, exist_ok=True)
-            os.makedirs(task_folder, exist_ok=True)
-            
-            print(f"Created folder structure: {task_folder}")
-        except Exception as folder_error:
-            print(f"Error creating folder structure: {str(folder_error)}")
-            return jsonify({
-                "error": "Failed to create folder structure",
-                "details": str(folder_error)
-            }), 500
-
         interaction_id = get_interaction_id(participant_id)
+
         session['trial_type'] = trial_type
         session['participant_id'] = participant_id
         session['interaction_id'] = interaction_id
         session['concept_attempts'] = {}
 
-        log_initialized = initialize_log_file(interaction_id, participant_id, trial_type)
-        if not log_initialized:
-            print("Warning: Failed to initialize log file")
+        db_session_id = initialize_session_in_db()
+
+        initialize_log_file(interaction_id, participant_id, trial_type)
 
         log_interaction("SYSTEM", None, f"Trial type changed from {old_trial_type} to {trial_type} for participant {participant_id}")
+        log_interaction_to_db_only("SYSTEM", "Session", f"Trial type set to {trial_type} for participant {participant_id}")
 
-        print(f"Successfully set trial type for participant {participant_id}")  # Debug print
+        print(f"Successfully set trial type for participant {participant_id}")
 
         return jsonify({
             'status': 'success',
             'trial_type': trial_type,
             'interaction_id': interaction_id,
-            'folder_structure': {
-                'participant_folder': participant_folder,
-                'task_folder': task_folder
-            }
+            'session_id': db_session_id  
         })
     except Exception as e:
-        print(f"Error in set_trial_type: {str(e)}")  # Debug print
+        print(f"Error in set_trial_type: {str(e)}")
         return jsonify({
             "error": f"Server error: {str(e)}",
             "type": "server_error"
@@ -812,7 +1078,18 @@ def log_user_interaction_endpoint():
     log_user_interaction(interaction_type, details)
     return jsonify({'status': 'success'})
 
+@app.route('/backup_to_cloud', methods=['POST'])
+def backup_to_cloud():
+    """Manual backup of current session files to cloud storage."""
+    try:
+        success = backup_existing_files_to_cloud()
+        if success:
+            return jsonify({'status': 'success', 'message': 'Files backed up to cloud'})
+        else:
+            return jsonify({'status': 'error', 'message': 'Backup failed'}), 500
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(port=5001)
-    # app.run(host='0.0.0.0', port=5001)
+    port = int(os.environ.get('PORT', 5001))
+    app.run(host='0.0.0.0', port=port, debug=False)
