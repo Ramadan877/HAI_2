@@ -1,3 +1,10 @@
+# Security - Never commit these files!
+.env
+.env.local
+.env.production
+.env.development
+*.env
+
 # Python
 venv/
 __pycache__/
