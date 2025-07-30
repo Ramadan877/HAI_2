@@ -1,10 +1,13 @@
 #Version 2
 from flask import Flask, request, render_template, jsonify, session, send_from_directory
 from werkzeug.utils import secure_filename
+from flask_cors import CORS 
 import openai
 import os.path
 from gtts import gTTS
 import whisper
+import warnings
+warnings.filterwarnings("ignore", category=SyntaxWarning)
 # Handle pydub audioop compatibility for Python 3.13
 try:
     from pydub import AudioSegment
