@@ -53,12 +53,27 @@ load_dotenv()
 def upload_to_s3(file_path, s3_key):
     """Upload file to S3 and return the URL."""
     try:
-        if not s3_client or not BUCKET_NAME:
+        # Check if S3 is configured
+        aws_access_key = os.environ.get('AWS_ACCESS_KEY_ID')
+        aws_secret_key = os.environ.get('AWS_SECRET_ACCESS_KEY')
+        aws_region = os.environ.get('AWS_REGION')
+        bucket_name = os.environ.get('CLOUD_STORAGE_BUCKET')
+        
+        if not all([aws_access_key, aws_secret_key, aws_region, bucket_name]):
             print("S3 not configured, skipping upload")
             return None
+        
+        # Initialize S3 client locally if needed
+        import boto3
+        s3 = boto3.client(
+            's3',
+            aws_access_key_id=aws_access_key,
+            aws_secret_access_key=aws_secret_key,
+            region_name=aws_region
+        )
             
-        s3_client.upload_file(file_path, BUCKET_NAME, s3_key)
-        return f"https://{BUCKET_NAME}.s3.{os.environ.get('AWS_REGION')}.amazonaws.com/{s3_key}"
+        s3.upload_file(file_path, bucket_name, s3_key)
+        return f"https://{bucket_name}.s3.{aws_region}.amazonaws.com/{s3_key}"
     except Exception as e:
         print(f"Error uploading to S3: {str(e)}")
         return None
@@ -66,7 +81,9 @@ def upload_to_s3(file_path, s3_key):
 def save_interaction_to_db(session_id, speaker, concept_name, message, attempt_number=1):
     """Save interaction to database."""
     try:
-        if not db or not app.config.get('SQLALCHEMY_DATABASE_URI'):
+        # Check if database is configured
+        database_url = os.environ.get('DATABASE_URL')
+        if not database_url:
             print("Database not configured, skipping interaction save")
             return
             
@@ -90,7 +107,7 @@ def save_recording_to_db(session_id, recording_type, file_path, original_filenam
                         file_size, concept_name=None, attempt_number=None):
     """Save recording metadata to database."""
     try:
-        if not db or not app.config.get('SQLALCHEMY_DATABASE_URI'):
+        if not db or not os.environ.get('DATABASE_URL'):
             print("Database not configured, skipping recording save")
             return None
             
@@ -117,7 +134,7 @@ def save_recording_to_db(session_id, recording_type, file_path, original_filenam
 def create_session_record(participant_id, trial_type, version):
     """Create a new session record."""
     try:
-        if not db or not app.config.get('SQLALCHEMY_DATABASE_URI'):
+        if not db or not os.environ.get('DATABASE_URL'):
             print("Database not configured, skipping session creation")
             return None
             
@@ -148,7 +165,7 @@ def create_session_record(participant_id, trial_type, version):
 def save_audio_with_cloud_backup(audio_data, filename, session_id, recording_type, concept_name=None, attempt_number=None):
     """Save audio locally and backup to cloud storage."""
     try:
-        local_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        local_path = os.path.join(UPLOAD_FOLDER, filename)
         
         if hasattr(audio_data, 'save'):
             audio_data.save(local_path)
