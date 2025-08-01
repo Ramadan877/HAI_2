@@ -1173,130 +1173,59 @@ def data_dashboard():
 
 @app.route('/export_complete_data')
 def export_complete_data():
-    """Export complete database data and local files as ZIP."""
+    """Export User Data folder structure as a ZIP file"""
     try:
         import zipfile
         import csv
-        from io import StringIO, BytesIO
+        import io
+        from flask import make_response
         
-        # Create a BytesIO object to hold the ZIP file
-        zip_buffer = BytesIO()
+        # Create a BytesIO object to store the ZIP
+        zip_buffer = io.BytesIO()
         
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-            # Export database tables as CSV
+            # Check if User Data folder exists
+            user_data_folder = app.config['USER_DATA_BASE_FOLDER']
             
-            # Participants
-            participants = Participant.query.all()
-            if participants:
-                csv_buffer = StringIO()
-                writer = csv.writer(csv_buffer)
-                writer.writerow(['ID', 'Participant_ID', 'Created_At'])
-                for p in participants:
-                    writer.writerow([p.id, p.participant_id, p.created_at])
-                zip_file.writestr('Database_Export/participants.csv', csv_buffer.getvalue())
-            
-            # Sessions
-            sessions = Session.query.all()
-            if sessions:
-                csv_buffer = StringIO()
-                writer = csv.writer(csv_buffer)
-                writer.writerow(['ID', 'Session_ID', 'Participant_ID', 'Trial_Type', 'Version', 'Started_At', 'Completed_At'])
-                for s in sessions:
-                    writer.writerow([s.id, s.session_id, s.participant_id, s.trial_type, s.version, s.started_at, s.completed_at])
-                zip_file.writestr('Database_Export/sessions.csv', csv_buffer.getvalue())
-            
-            # Interactions
-            interactions = Interaction.query.all()
-            if interactions:
-                csv_buffer = StringIO()
-                writer = csv.writer(csv_buffer)
-                writer.writerow(['ID', 'Session_ID', 'Speaker', 'Concept_Name', 'Message', 'Timestamp', 'Attempt_Number'])
-                for i in interactions:
-                    writer.writerow([i.id, i.session_id, i.speaker, i.concept_name, i.message, i.timestamp, i.attempt_number])
-                zip_file.writestr('Database_Export/interactions.csv', csv_buffer.getvalue())
-            
-            # Recordings
-            recordings = Recording.query.all()
-            if recordings:
-                csv_buffer = StringIO()
-                writer = csv.writer(csv_buffer)
-                writer.writerow(['ID', 'Session_ID', 'Recording_Type', 'File_Path', 'Original_Filename', 'File_Size', 'Concept_Name', 'Attempt_Number', 'Created_At'])
-                for r in recordings:
-                    writer.writerow([r.id, r.session_id, r.recording_type, r.file_path, r.original_filename, r.file_size, r.concept_name, r.attempt_number, r.created_at])
-                zip_file.writestr('Database_Export/recordings.csv', csv_buffer.getvalue())
-            
-            # Add local User Data files
-            user_data_path = app.config['USER_DATA_BASE_FOLDER']
-            if os.path.exists(user_data_path):
-                for root, dirs, files in os.walk(user_data_path):
+            if os.path.exists(user_data_folder):
+                # Add all files from User Data folder to ZIP
+                for root, dirs, files in os.walk(user_data_folder):
                     for file in files:
                         file_path = os.path.join(root, file)
-                        archive_path = os.path.relpath(file_path, os.path.dirname(user_data_path))
-                        try:
-                            zip_file.write(file_path, archive_path)
-                        except Exception as e:
-                            print(f"Could not add file {file_path}: {str(e)}")
-        
-        zip_buffer.seek(0)
-        
-        from flask import Response
-        return Response(
-            zip_buffer.getvalue(),
-            mimetype='application/zip',
-            headers={'Content-Disposition': f'attachment; filename=HAI_V2_Complete_Data_Export_{datetime.now().strftime("%Y%m%d_%H%M%S")}.zip'}
-        )
-        
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-@app.route('/export_csv')
-def export_csv():
-    """Export database data as CSV files."""
-    try:
-        import csv
-        import zipfile
-        from io import StringIO, BytesIO
-        
-        zip_buffer = BytesIO()
-        
-        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-            # Export each table as CSV
-            tables = [
-                ('participants', Participant.query.all(), ['ID', 'Participant_ID', 'Created_At']),
-                ('sessions', Session.query.all(), ['ID', 'Session_ID', 'Participant_ID', 'Trial_Type', 'Version', 'Started_At', 'Completed_At']),
-                ('interactions', Interaction.query.all(), ['ID', 'Session_ID', 'Speaker', 'Concept_Name', 'Message', 'Timestamp', 'Attempt_Number']),
-                ('recordings', Recording.query.all(), ['ID', 'Session_ID', 'Recording_Type', 'File_Path', 'Original_Filename', 'File_Size', 'Concept_Name', 'Attempt_Number', 'Created_At'])
-            ]
+                        # Create relative path within the ZIP starting with "User Data"
+                        arcname = os.path.relpath(file_path, os.path.dirname(user_data_folder))
+                        zip_file.write(file_path, arcname)
             
-            for table_name, data, headers in tables:
-                if data:
-                    csv_buffer = StringIO()
-                    writer = csv.writer(csv_buffer)
-                    writer.writerow(headers)
-                    
-                    for item in data:
-                        if table_name == 'participants':
-                            writer.writerow([item.id, item.participant_id, item.created_at])
-                        elif table_name == 'sessions':
-                            writer.writerow([item.id, item.session_id, item.participant_id, item.trial_type, item.version, item.started_at, item.completed_at])
-                        elif table_name == 'interactions':
-                            writer.writerow([item.id, item.session_id, item.speaker, item.concept_name, item.message, item.timestamp, item.attempt_number])
-                        elif table_name == 'recordings':
-                            writer.writerow([item.id, item.session_id, item.recording_type, item.file_path, item.original_filename, item.file_size, item.concept_name, item.attempt_number, item.created_at])
-                    
-                    zip_file.writestr(f'{table_name}.csv', csv_buffer.getvalue())
+            # Create summary CSV with participant data
+            participants = Participant.query.all()
+            
+            # Create summary CSV content
+            csv_buffer = io.StringIO()
+            writer = csv.writer(csv_buffer)
+            writer.writerow(['participant_id', 'created_at', 'session_count', 'interaction_count', 'recording_count'])
+            
+            for p in participants:
+                session_count = Session.query.filter_by(participant_id=p.participant_id).count()
+                interaction_count = Interaction.query.join(Session).filter(Session.participant_id == p.participant_id).count()
+                recording_count = Recording.query.join(Session).filter(Session.participant_id == p.participant_id).count()
+                
+                writer.writerow([p.participant_id, p.created_at, session_count, interaction_count, recording_count])
+            
+            zip_file.writestr('participants_summary.csv', csv_buffer.getvalue())
+            csv_buffer.close()
         
         zip_buffer.seek(0)
         
-        from flask import Response
-        return Response(
-            zip_buffer.getvalue(),
-            mimetype='application/zip',
-            headers={'Content-Disposition': f'attachment; filename=HAI_V2_Database_Export_{datetime.now().strftime("%Y%m%d_%H%M%S")}.zip'}
-        )
+        # Create response
+        response = make_response(zip_buffer.getvalue())
+        response.headers['Content-Type'] = 'application/zip'
+        response.headers['Content-Disposition'] = 'attachment; filename=HAI_V2_User_Data_Export.zip'
+        
+        return response
         
     except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        print(f"Error exporting User Data: {e}")
+        return jsonify({'error': 'Failed to export User Data'}), 500
 
 @app.route('/browse_files')
 def browse_files():
@@ -1327,77 +1256,6 @@ def browse_files():
             'file_structure': file_structure,
             'base_path': user_data_path
         })
-        
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-@app.route('/export_participant/<participant_id>')
-def export_participant_data(participant_id):
-    """Export data for a specific participant."""
-    try:
-        import zipfile
-        import csv
-        from io import StringIO, BytesIO
-        
-        # Get participant data from database
-        participant = Participant.query.filter_by(participant_id=participant_id).first()
-        if not participant:
-            return jsonify({'status': 'error', 'message': 'Participant not found'}), 404
-        
-        sessions = Session.query.filter_by(participant_id=participant_id).all()
-        session_ids = [s.session_id for s in sessions]
-        
-        interactions = Interaction.query.filter(Interaction.session_id.in_(session_ids)).all() if session_ids else []
-        recordings = Recording.query.filter(Recording.session_id.in_(session_ids)).all() if session_ids else []
-        
-        zip_buffer = BytesIO()
-        
-        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-            # Export participant database data
-            if sessions:
-                csv_buffer = StringIO()
-                writer = csv.writer(csv_buffer)
-                writer.writerow(['Session_ID', 'Trial_Type', 'Version', 'Started_At', 'Completed_At'])
-                for s in sessions:
-                    writer.writerow([s.session_id, s.trial_type, s.version, s.started_at, s.completed_at])
-                zip_file.writestr(f'Database_Export/{participant_id}_sessions.csv', csv_buffer.getvalue())
-            
-            if interactions:
-                csv_buffer = StringIO()
-                writer = csv.writer(csv_buffer)
-                writer.writerow(['Session_ID', 'Speaker', 'Concept_Name', 'Message', 'Timestamp', 'Attempt_Number'])
-                for i in interactions:
-                    writer.writerow([i.session_id, i.speaker, i.concept_name, i.message, i.timestamp, i.attempt_number])
-                zip_file.writestr(f'Database_Export/{participant_id}_interactions.csv', csv_buffer.getvalue())
-            
-            if recordings:
-                csv_buffer = StringIO()
-                writer = csv.writer(csv_buffer)
-                writer.writerow(['Session_ID', 'Recording_Type', 'File_Path', 'Original_Filename', 'File_Size', 'Concept_Name', 'Attempt_Number', 'Created_At'])
-                for r in recordings:
-                    writer.writerow([r.session_id, r.recording_type, r.file_path, r.original_filename, r.file_size, r.concept_name, r.attempt_number, r.created_at])
-                zip_file.writestr(f'Database_Export/{participant_id}_recordings.csv', csv_buffer.getvalue())
-            
-            # Add participant's local files (V2 uses different folder structure)
-            participant_folder = os.path.join(app.config['USER_DATA_BASE_FOLDER'], participant_id)
-            if os.path.exists(participant_folder):
-                for root, dirs, files in os.walk(participant_folder):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        archive_path = f"User_Data/{participant_id}/" + os.path.relpath(file_path, participant_folder)
-                        try:
-                            zip_file.write(file_path, archive_path)
-                        except Exception as e:
-                            print(f"Could not add file {file_path}: {str(e)}")
-        
-        zip_buffer.seek(0)
-        
-        from flask import Response
-        return Response(
-            zip_buffer.getvalue(),
-            mimetype='application/zip',
-            headers={'Content-Disposition': f'attachment; filename=HAI_V2_Participant_{participant_id}_Data_{datetime.now().strftime("%Y%m%d_%H%M%S")}.zip'}
-        )
         
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
