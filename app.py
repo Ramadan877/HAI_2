@@ -42,7 +42,6 @@ import threading
 from functools import lru_cache
 from functools import wraps
 from concurrent.futures import ThreadPoolExecutor
-import boto3
 from dotenv import load_dotenv
 from database import db, Participant, Session, Interaction, Recording, UserEvent
 import uuid
@@ -50,38 +49,9 @@ import uuid
 load_dotenv()
 
 
-def upload_to_s3(file_path, s3_key):
-    """Upload file to S3 and return the URL."""
-    try:
-        # Check if S3 is configured
-        aws_access_key = os.environ.get('AWS_ACCESS_KEY_ID')
-        aws_secret_key = os.environ.get('AWS_SECRET_ACCESS_KEY')
-        aws_region = os.environ.get('AWS_REGION')
-        bucket_name = os.environ.get('CLOUD_STORAGE_BUCKET')
-        
-        if not all([aws_access_key, aws_secret_key, aws_region, bucket_name]):
-            print("S3 not configured, skipping upload")
-            return None
-        
-        # Initialize S3 client locally if needed
-        import boto3
-        s3 = boto3.client(
-            's3',
-            aws_access_key_id=aws_access_key,
-            aws_secret_access_key=aws_secret_key,
-            region_name=aws_region
-        )
-            
-        s3.upload_file(file_path, bucket_name, s3_key)
-        return f"https://{bucket_name}.s3.{aws_region}.amazonaws.com/{s3_key}"
-    except Exception as e:
-        print(f"Error uploading to S3: {str(e)}")
-        return None
-
 def save_interaction_to_db(session_id, speaker, concept_name, message, attempt_number=1):
     """Save interaction to database."""
     try:
-        # Check if database is configured
         database_url = os.environ.get('DATABASE_URL')
         if not database_url:
             print("Database not configured, skipping interaction save")
@@ -163,7 +133,7 @@ def create_session_record(participant_id, trial_type, version):
 
 
 def save_audio_with_cloud_backup(audio_data, filename, session_id, recording_type, concept_name=None, attempt_number=None):
-    """Save audio locally and backup to cloud storage."""
+    """Save audio locally."""
     try:
         local_path = os.path.join(UPLOAD_FOLDER, filename)
         
@@ -173,30 +143,7 @@ def save_audio_with_cloud_backup(audio_data, filename, session_id, recording_typ
             with open(local_path, 'wb') as f:
                 f.write(audio_data)
         
-        cloud_url = None
-        try:
-            s3_key = f"recordings/{session_id}/{filename}"
-            cloud_url = upload_to_s3(local_path, s3_key)
-        except Exception as s3_error:
-            print(f"S3 upload failed, continuing without cloud backup: {str(s3_error)}")
-        
-
-        try:
-            if cloud_url:
-                file_size = os.path.getsize(local_path) if os.path.exists(local_path) else 0
-                save_recording_to_db(
-                    session_id=session_id,
-                    recording_type=recording_type,
-                    file_path=cloud_url,
-                    original_filename=filename,
-                    file_size=file_size,
-                    concept_name=concept_name,
-                    attempt_number=attempt_number
-                )
-        except Exception as db_error:
-            print(f"Database recording save failed, continuing: {str(db_error)}")
-        
-        return local_path, cloud_url
+        return local_path, None
     except Exception as e:
         print(f"Error in save_audio_with_cloud_backup: {str(e)}")
         return None, None
@@ -213,64 +160,8 @@ def log_interaction_to_db_only(speaker, concept_name, message, attempt_number=1)
         print(f"Error logging interaction to database: {str(e)}")
 
 def backup_existing_files_to_cloud():
-    """Backup existing local files to cloud storage - can be called periodically."""
-    try:
-        participant_id = session.get('participant_id')
-        trial_type = session.get('trial_type')
-        session_id = session.get('session_id')
-        
-        if not all([participant_id, trial_type, session_id]):
-            return False
-            
-        folders = get_participant_folder(participant_id, trial_type)
-        participant_folder = folders['participant_folder']
-        
-        for filename in os.listdir(participant_folder):
-            if filename.endswith(('.mp3', '.wav', '.webm')):
-                local_path = os.path.join(participant_folder, filename)
-                s3_key = f"recordings/{session_id}/{filename}"
-                cloud_url = upload_to_s3(local_path, s3_key)
-                
-                if cloud_url:
-                    recording_type = 'audio'
-                    if 'user_' in filename:
-                        recording_type = 'user_audio'
-                    elif 'ai_' in filename:
-                        recording_type = 'ai_audio'
-                    elif 'screen_recording' in filename:
-                        recording_type = 'screen'
-                    
-                    file_size = os.path.getsize(local_path)
-                    save_recording_to_db(
-                        session_id=session_id,
-                        recording_type=recording_type,
-                        file_path=cloud_url,
-                        original_filename=filename,
-                        file_size=file_size
-                    )
-        
-        screen_folder = folders['screen_recordings_folder']
-        if os.path.exists(screen_folder):
-            for filename in os.listdir(screen_folder):
-                if filename.endswith('.webm'):
-                    local_path = os.path.join(screen_folder, filename)
-                    s3_key = f"screen_recordings/{session_id}/{filename}"
-                    cloud_url = upload_to_s3(local_path, s3_key)
-                    
-                    if cloud_url:
-                        file_size = os.path.getsize(local_path)
-                        save_recording_to_db(
-                            session_id=session_id,
-                            recording_type='screen',
-                            file_path=cloud_url,
-                            original_filename=filename,
-                            file_size=file_size
-                        )
-        
-        return True
-    except Exception as e:
-        print(f"Error backing up files to cloud: {str(e)}")
-        return False
+    """This function is no longer needed but kept for compatibility."""
+    return False
 
 def initialize_session_in_db():
     """Initialize session in database when user starts - call this in set_trial_type."""
@@ -320,15 +211,6 @@ app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY')
 app.secret_key = os.environ.get('SECRET_KEY', 'fallback-secret-key')
 
 db.init_app(app)
-
-s3_client = boto3.client(
-    's3',
-    aws_access_key_id=os.environ.get('AWS_ACCESS_KEY_ID'),
-    aws_secret_access_key=os.environ.get('AWS_SECRET_ACCESS_KEY'),
-    region_name=os.environ.get('AWS_REGION')
-)
-
-BUCKET_NAME = os.environ.get('CLOUD_STORAGE_BUCKET')
 
 with app.app_context():
     db.create_all()
@@ -921,7 +803,7 @@ def submit_message():
                 'ai_audio', concept_name, current_attempt_count + 1
             )
     except Exception as e:
-        print(f"Cloud backup failed, but continuing: {str(e)}")
+        print(f"Audio backup failed, but continuing: {str(e)}")
 
     if not os.path.exists(audio_response_path):
         print("Error: AI audio file not created!")  
@@ -1122,13 +1004,9 @@ def log_user_interaction_endpoint():
 
 @app.route('/backup_to_cloud', methods=['POST'])
 def backup_to_cloud():
-    """Manual backup of current session files to cloud storage."""
+    """Manual backup endpoint - no longer functional but kept for compatibility."""
     try:
-        success = backup_existing_files_to_cloud()
-        if success:
-            return jsonify({'status': 'success', 'message': 'Files backed up to cloud'})
-        else:
-            return jsonify({'status': 'error', 'message': 'Backup failed'}), 500
+        return jsonify({'status': 'info', 'message': 'Cloud backup functionality has been removed. Use /export_complete_data to download User Data.'})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
@@ -1138,13 +1016,11 @@ def backup_to_cloud():
 def data_dashboard():
     """Display a simple dashboard for data export and management."""
     try:
-        # Get database statistics
         total_participants = Participant.query.count()
         total_sessions = Session.query.count()
         total_interactions = Interaction.query.count()
         total_recordings = Recording.query.count()
         
-        # Get recent sessions
         recent_sessions = Session.query.order_by(Session.started_at.desc()).limit(10).all()
         
         stats = {
@@ -1180,43 +1056,40 @@ def export_complete_data():
         import io
         from flask import make_response
         
-        # Create a BytesIO object to store the ZIP
         zip_buffer = io.BytesIO()
         
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-            # Check if User Data folder exists
             user_data_folder = app.config['USER_DATA_BASE_FOLDER']
             
             if os.path.exists(user_data_folder):
-                # Add all files from User Data folder to ZIP
                 for root, dirs, files in os.walk(user_data_folder):
                     for file in files:
                         file_path = os.path.join(root, file)
-                        # Create relative path within the ZIP starting with "User Data"
                         arcname = os.path.relpath(file_path, os.path.dirname(user_data_folder))
                         zip_file.write(file_path, arcname)
             
-            # Create summary CSV with participant data
-            participants = Participant.query.all()
-            
-            # Create summary CSV content
-            csv_buffer = io.StringIO()
-            writer = csv.writer(csv_buffer)
-            writer.writerow(['participant_id', 'created_at', 'session_count', 'interaction_count', 'recording_count'])
-            
-            for p in participants:
-                session_count = Session.query.filter_by(participant_id=p.participant_id).count()
-                interaction_count = Interaction.query.join(Session).filter(Session.participant_id == p.participant_id).count()
-                recording_count = Recording.query.join(Session).filter(Session.participant_id == p.participant_id).count()
+            # Add participants summary if database is available
+            try:
+                participants = Participant.query.all()
                 
-                writer.writerow([p.participant_id, p.created_at, session_count, interaction_count, recording_count])
-            
-            zip_file.writestr('participants_summary.csv', csv_buffer.getvalue())
-            csv_buffer.close()
+                csv_buffer = io.StringIO()
+                writer = csv.writer(csv_buffer)
+                writer.writerow(['participant_id', 'created_at', 'session_count', 'interaction_count', 'recording_count'])
+                
+                for p in participants:
+                    session_count = Session.query.filter_by(participant_id=p.participant_id).count()
+                    interaction_count = Interaction.query.join(Session).filter(Session.participant_id == p.participant_id).count()
+                    recording_count = Recording.query.join(Session).filter(Session.participant_id == p.participant_id).count()
+                    
+                    writer.writerow([p.participant_id, p.created_at, session_count, interaction_count, recording_count])
+                
+                zip_file.writestr('participants_summary.csv', csv_buffer.getvalue())
+                csv_buffer.close()
+            except Exception as db_error:
+                print(f"Database summary not available: {str(db_error)}")
         
         zip_buffer.seek(0)
         
-        # Create response
         response = make_response(zip_buffer.getvalue())
         response.headers['Content-Type'] = 'application/zip'
         response.headers['Content-Disposition'] = 'attachment; filename=HAI_V2_User_Data_Export.zip'
