@@ -1049,56 +1049,253 @@ def data_dashboard():
 
 @app.route('/export_complete_data')
 def export_complete_data():
-    """Export User Data folder structure as a ZIP file"""
+    """Export available user data - files if they exist, otherwise comprehensive database export."""
     try:
         import zipfile
         import csv
-        import io
+        from io import StringIO, BytesIO
         from flask import make_response
         
-        zip_buffer = io.BytesIO()
+        zip_buffer = BytesIO()
+        files_found = False
         
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-            user_data_folder = app.config['USER_DATA_BASE_FOLDER']
             
-            if os.path.exists(user_data_folder):
-                for root, dirs, files in os.walk(user_data_folder):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        arcname = os.path.relpath(file_path, os.path.dirname(user_data_folder))
-                        zip_file.write(file_path, arcname)
-            
-            # Add participants summary if database is available
-            try:
-                participants = Participant.query.all()
+            # Check if any actual user files exist
+            user_data_path = app.config['USER_DATA_BASE_FOLDER']
+            if os.path.exists(user_data_path):
+                print(f"Checking for User Data files in: {user_data_path}")
                 
-                csv_buffer = io.StringIO()
-                writer = csv.writer(csv_buffer)
-                writer.writerow(['participant_id', 'created_at', 'session_count', 'interaction_count', 'recording_count'])
+                all_files = []
+                for root, dirs, files in os.walk(user_data_path):
+                    all_files.extend(files)
                 
-                for p in participants:
-                    session_count = Session.query.filter_by(participant_id=p.participant_id).count()
-                    interaction_count = Interaction.query.join(Session).filter(Session.participant_id == p.participant_id).count()
-                    recording_count = Recording.query.join(Session).filter(Session.participant_id == p.participant_id).count()
+                if all_files:  # Only process if files exist
+                    files_found = True
+                    print(f"Found {len(all_files)} files in user data folder")
                     
-                    writer.writerow([p.participant_id, p.created_at, session_count, interaction_count, recording_count])
+                    for root, dirs, files in os.walk(user_data_path):
+                        for file in files:
+                            file_path = os.path.join(root, file)
+                            arcname = os.path.relpath(file_path, os.path.dirname(user_data_path))
+                            try:
+                                zip_file.write(file_path, arcname)
+                                print(f"Added: {arcname}")
+                            except Exception as e:
+                                print(f"Could not add file {file_path}: {str(e)}")
+            
+            # If no files found, create comprehensive database export
+            if not files_found:
+                print("No user files found - creating database export instead")
                 
-                zip_file.writestr('participants_summary.csv', csv_buffer.getvalue())
-                csv_buffer.close()
-            except Exception as db_error:
-                print(f"Database summary not available: {str(db_error)}")
+                # Export detailed interaction data
+                interactions = Interaction.query.join(Session).order_by(Session.started_at.desc(), Interaction.created_at.asc()).all()
+                if interactions:
+                    csv_buffer = StringIO()
+                    writer = csv.writer(csv_buffer)
+                    writer.writerow([
+                        'Session_ID', 'Participant_ID', 'Trial_Type', 'Version', 
+                        'Speaker', 'Concept_Name', 'Message', 'Attempt_Number', 
+                        'Interaction_Time', 'Session_Started'
+                    ])
+                    
+                    for interaction in interactions:
+                        session = Session.query.filter_by(session_id=interaction.session_id).first()
+                        writer.writerow([
+                            interaction.session_id,
+                            session.participant_id if session else 'Unknown',
+                            session.trial_type if session else 'Unknown',
+                            session.version if session else 'Unknown',
+                            interaction.speaker,
+                            interaction.concept_name,
+                            interaction.message,
+                            interaction.attempt_number,
+                            interaction.created_at,
+                            session.started_at if session else 'Unknown'
+                        ])
+                    
+                    zip_file.writestr('All_Interactions_Data.csv', csv_buffer.getvalue())
+                
+                # Export participants summary
+                participants = Participant.query.all()
+                if participants:
+                    csv_buffer = StringIO()
+                    writer = csv.writer(csv_buffer)
+                    writer.writerow(['Participant_ID', 'Total_Sessions', 'Total_Interactions', 'Created_At', 'Trial_Types'])
+                    
+                    for p in participants:
+                        sessions = Session.query.filter_by(participant_id=p.participant_id).all()
+                        sessions_count = len(sessions)
+                        trial_types = list(set([s.trial_type for s in sessions if s.trial_type]))
+                        
+                        total_interactions = 0
+                        for s in sessions:
+                            interactions_count = Interaction.query.filter_by(session_id=s.session_id).count()
+                            total_interactions += interactions_count
+                        
+                        writer.writerow([
+                            p.participant_id, 
+                            sessions_count, 
+                            total_interactions, 
+                            p.created_at,
+                            '; '.join(trial_types)
+                        ])
+                    
+                    zip_file.writestr('Participants_Summary.csv', csv_buffer.getvalue())
+                
+                # Add a README explaining the situation
+                readme_content = """HAI V2 Data Export - Database Only
+
+IMPORTANT NOTICE:
+================
+This export contains database records only. Audio/video files are not available 
+due to Render's ephemeral storage system.
+
+WHAT'S INCLUDED:
+===============
+- All_Interactions_Data.csv: Complete conversation logs with timestamps
+- Participants_Summary.csv: Participant statistics and trial information
+
+MISSING DATA:
+=============
+- Audio recordings (user voice inputs)
+- AI-generated audio responses
+- Screen recordings
+- Log files
+
+For future data collection, consider implementing persistent storage 
+(AWS S3, Google Cloud, etc.) to preserve audio/video files.
+
+Export generated: """ + datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                
+                zip_file.writestr('README.txt', readme_content)
+            
+            else:
+                # Files were found, add database summary as well
+                try:
+                    participants = Participant.query.all()
+                    
+                    csv_buffer = StringIO()
+                    writer = csv.writer(csv_buffer)
+                    writer.writerow(['participant_id', 'created_at', 'session_count', 'interaction_count', 'recording_count'])
+                    
+                    for p in participants:
+                        session_count = Session.query.filter_by(participant_id=p.participant_id).count()
+                        interaction_count = Interaction.query.join(Session).filter(Session.participant_id == p.participant_id).count()
+                        recording_count = Recording.query.join(Session).filter(Session.participant_id == p.participant_id).count()
+                        
+                        writer.writerow([p.participant_id, p.created_at, session_count, interaction_count, recording_count])
+                    
+                    zip_file.writestr('Database_Summary.csv', csv_buffer.getvalue())
+                except Exception as db_error:
+                    print(f"Database summary not available: {str(db_error)}")
         
         zip_buffer.seek(0)
         
-        response = make_response(zip_buffer.getvalue())
-        response.headers['Content-Type'] = 'application/zip'
-        response.headers['Content-Disposition'] = 'attachment; filename=HAI_V2_User_Data_Export.zip'
-        
-        return response
-        
+        # Check if zip has meaningful content
+        if zip_buffer.getvalue():
+            filename_prefix = "HAI_V2_Files_Export" if files_found else "HAI_V2_Database_Export"
+            response = make_response(zip_buffer.getvalue())
+            response.headers['Content-Type'] = 'application/zip'
+            response.headers['Content-Disposition'] = f'attachment; filename={filename_prefix}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.zip'
+            return response
+        else:
+            return jsonify({
+                'status': 'error', 
+                'message': 'No data available for export. Please ensure participants have completed interactions.'
+            }), 404
+            
     except Exception as e:
-        print(f"Error exporting User Data: {e}")
-        return jsonify({'error': 'Failed to export User Data'}), 500
+        print(f"Export error: {str(e)}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/export_latest_session')
+def export_latest_session():
+    """Export only the most recent session data for each participant."""
+    try:
+        import zipfile
+        import csv
+        from io import StringIO, BytesIO
+        from flask import make_response
+        
+        zip_buffer = BytesIO()
+        
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            
+            # Get the most recent session for each participant
+            latest_sessions = []
+            participants = Participant.query.all()
+            
+            for participant in participants:
+                latest_session = Session.query.filter_by(participant_id=participant.participant_id)\
+                                                .order_by(Session.started_at.desc()).first()
+                if latest_session:
+                    latest_sessions.append(latest_session)
+            
+            if latest_sessions:
+                # Export interactions from latest sessions only
+                csv_buffer = StringIO()
+                writer = csv.writer(csv_buffer)
+                writer.writerow([
+                    'Participant_ID', 'Session_ID', 'Trial_Type', 'Version',
+                    'Speaker', 'Concept_Name', 'Message', 'Attempt_Number', 
+                    'Interaction_Time', 'Session_Started'
+                ])
+                
+                for session in latest_sessions:
+                    interactions = Interaction.query.filter_by(session_id=session.session_id)\
+                                                      .order_by(Interaction.created_at.asc()).all()
+                    
+                    for interaction in interactions:
+                        writer.writerow([
+                            session.participant_id,
+                            interaction.session_id,
+                            session.trial_type,
+                            session.version,
+                            interaction.speaker,
+                            interaction.concept_name,
+                            interaction.message,
+                            interaction.attempt_number,
+                            interaction.created_at,
+                            session.started_at
+                        ])
+                
+                zip_file.writestr('Latest_Session_Interactions.csv', csv_buffer.getvalue())
+                
+                # Add session summary
+                csv_buffer = StringIO()
+                writer = csv.writer(csv_buffer)
+                writer.writerow(['Participant_ID', 'Session_ID', 'Trial_Type', 'Version', 'Started_At', 'Total_Interactions'])
+                
+                for session in latest_sessions:
+                    interactions_count = Interaction.query.filter_by(session_id=session.session_id).count()
+                    writer.writerow([
+                        session.participant_id,
+                        session.session_id,
+                        session.trial_type,
+                        session.version,
+                        session.started_at,
+                        interactions_count
+                    ])
+                
+                zip_file.writestr('Latest_Sessions_Summary.csv', csv_buffer.getvalue())
+        
+        zip_buffer.seek(0)
+        
+        if zip_buffer.getvalue():
+            response = make_response(zip_buffer.getvalue())
+            response.headers['Content-Type'] = 'application/zip'
+            response.headers['Content-Disposition'] = f'attachment; filename=HAI_V2_Latest_Sessions_{datetime.now().strftime("%Y%m%d_%H%M%S")}.zip'
+            return response
+        else:
+            return jsonify({
+                'status': 'error', 
+                'message': 'No recent session data available for export.'
+            }), 404
+            
+    except Exception as e:
+        print(f"Latest session export error: {str(e)}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/browse_files')
 def browse_files():
@@ -1134,6 +1331,71 @@ def browse_files():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 # =========================== END DATA EXPORT FUNCTIONALITY ===========================
+
+@app.route('/diagnostic_filesystem')
+def diagnostic_filesystem():
+    """Diagnostic route to check file system status on Render."""
+    try:
+        diagnostic_info = {
+            'current_working_directory': os.getcwd(),
+            'user_data_folder_exists': os.path.exists(app.config['USER_DATA_BASE_FOLDER']),
+            'user_data_folder_path': app.config['USER_DATA_BASE_FOLDER'],
+            'folder_contents': {},
+            'disk_info': {},
+            'environment_vars': {
+                'PORT': os.environ.get('PORT', 'Not set'),
+                'RENDER': os.environ.get('RENDER', 'Not set'),
+                'DATABASE_URL': 'Set' if os.environ.get('DATABASE_URL') else 'Not set'
+            }
+        }
+        
+        # Check if folders exist and list contents
+        user_data_path = app.config['USER_DATA_BASE_FOLDER']
+        if os.path.exists(user_data_path):
+            user_data_contents = []
+            for root, dirs, files in os.walk(user_data_path):
+                rel_path = os.path.relpath(root, user_data_path)
+                user_data_contents.append({
+                    'path': rel_path,
+                    'directories': dirs,
+                    'files': files,
+                    'file_count': len(files)
+                })
+            diagnostic_info['folder_contents']['user_data'] = user_data_contents
+        
+        # Check disk usage if possible
+        try:
+            import shutil
+            total, used, free = shutil.disk_usage('/')
+            diagnostic_info['disk_info'] = {
+                'total_gb': round(total / (1024**3), 2),
+                'used_gb': round(used / (1024**3), 2),
+                'free_gb': round(free / (1024**3), 2)
+            }
+        except:
+            diagnostic_info['disk_info'] = 'Unable to get disk info'
+            
+        # Check recordings in database
+        total_recordings = Recording.query.count()
+        recordings_with_files = Recording.query.filter(Recording.file_path.isnot(None)).count()
+        
+        diagnostic_info['database_info'] = {
+            'total_recordings_in_db': total_recordings,
+            'recordings_with_file_paths': recordings_with_files,
+            'sample_recording_paths': [r.file_path for r in Recording.query.limit(5).all() if r.file_path]
+        }
+        
+        return jsonify({
+            'status': 'success',
+            'diagnostic': diagnostic_info
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e),
+            'error_type': type(e).__name__
+        }), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5001))
