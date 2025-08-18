@@ -850,6 +850,76 @@
               loadPDF();
           });
       </script>
+
+      <!-- Cloud Storage Auto-Upload Script -->
+      <script>
+          let isUploadTriggered = false;
+
+          function triggerCloudUpload() {
+              if (isUploadTriggered) return; 
+              isUploadTriggered = true;
+              
+              try {
+                  navigator.sendBeacon('/on_page_unload', JSON.stringify({
+                      timestamp: new Date().toISOString(),
+                      trigger: 'page_unload',
+                      version: 'V2'
+                  }));
+                  
+                  console.log('V2: Cloud upload triggered on page unload');
+              } catch (error) {
+                  console.error('V2: Error triggering cloud upload:', error);
+              }
+          }
+
+          window.addEventListener('beforeunload', function(event) {
+              triggerCloudUpload();
+          });
+
+          window.addEventListener('unload', function(event) {
+              triggerCloudUpload();
+          });
+
+          document.addEventListener('visibilitychange', function() {
+              if (document.visibilityState === 'hidden') {
+                  triggerCloudUpload();
+              }
+          });
+
+          window.addEventListener('blur', function() {
+              setTimeout(() => {
+                  if (!document.hasFocus()) {
+                      triggerCloudUpload();
+                  }
+              }, 1000);
+          });
+
+          window.manualCloudUpload = function() {
+              fetch('/trigger_cloud_upload', {
+                  method: 'POST',
+                  headers: {
+                      'Content-Type': 'application/json',
+                  },
+                  body: JSON.stringify({
+                      timestamp: new Date().toISOString(),
+                      trigger: 'manual',
+                      version: 'V2'
+                  })
+              })
+              .then(response => response.json())
+              .then(data => {
+                  console.log('V2: Manual upload result:', data);
+                  if (typeof alert !== 'undefined') {
+                      alert(`V2: ${data.message}`);
+                  }
+              })
+              .catch(error => {
+                  console.error('V2: Manual upload error:', error);
+              });
+          };
+
+          console.log('V2: Cloud storage auto-upload initialized');
+      </script>
   </body>
   </html>
 

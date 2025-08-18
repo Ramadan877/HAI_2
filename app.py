@@ -46,6 +46,18 @@ from dotenv import load_dotenv
 from database import db, Participant, Session, Interaction, Recording, UserEvent
 import uuid
 
+# Import cloud storage functionality (optional - won't break if module is missing)
+try:
+    from cloud_storage import upload_user_data_to_cloud
+    CLOUD_STORAGE_AVAILABLE = True
+    print("Cloud storage module loaded successfully")
+except ImportError as e:
+    CLOUD_STORAGE_AVAILABLE = False
+    print(f"Cloud storage module not available: {str(e)}")
+    def upload_user_data_to_cloud(*args, **kwargs):
+        print("Cloud storage not available - skipping upload")
+        pass
+
 load_dotenv()
 
 
@@ -1061,7 +1073,6 @@ def export_complete_data():
         
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
             
-            # Check if any actual user files exist
             user_data_path = app.config['USER_DATA_BASE_FOLDER']
             if os.path.exists(user_data_path):
                 print(f"Checking for User Data files in: {user_data_path}")
@@ -1070,7 +1081,7 @@ def export_complete_data():
                 for root, dirs, files in os.walk(user_data_path):
                     all_files.extend(files)
                 
-                if all_files:  # Only process if files exist
+                if all_files:  
                     files_found = True
                     print(f"Found {len(all_files)} files in user data folder")
                     
@@ -1084,11 +1095,9 @@ def export_complete_data():
                             except Exception as e:
                                 print(f"Could not add file {file_path}: {str(e)}")
             
-            # If no files found, create comprehensive database export
             if not files_found:
                 print("No user files found - creating database export instead")
                 
-                # Export detailed interaction data
                 interactions = Interaction.query.join(Session).order_by(Session.started_at.desc(), Interaction.created_at.asc()).all()
                 if interactions:
                     csv_buffer = StringIO()
@@ -1116,7 +1125,6 @@ def export_complete_data():
                     
                     zip_file.writestr('All_Interactions_Data.csv', csv_buffer.getvalue())
                 
-                # Export participants summary
                 participants = Participant.query.all()
                 if participants:
                     csv_buffer = StringIO()
@@ -1143,7 +1151,6 @@ def export_complete_data():
                     
                     zip_file.writestr('Participants_Summary.csv', csv_buffer.getvalue())
                 
-                # Add a README explaining the situation
                 readme_content = """HAI V2 Data Export - Database Only
 
 IMPORTANT NOTICE:
@@ -1171,7 +1178,6 @@ Export generated: """ + datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 zip_file.writestr('README.txt', readme_content)
             
             else:
-                # Files were found, add database summary as well
                 try:
                     participants = Participant.query.all()
                     
@@ -1192,7 +1198,6 @@ Export generated: """ + datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
         zip_buffer.seek(0)
         
-        # Check if zip has meaningful content
         if zip_buffer.getvalue():
             filename_prefix = "HAI_V2_Files_Export" if files_found else "HAI_V2_Database_Export"
             response = make_response(zip_buffer.getvalue())
@@ -1222,7 +1227,6 @@ def export_latest_session():
         
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
             
-            # Get the most recent session for each participant
             latest_sessions = []
             participants = Participant.query.all()
             
@@ -1233,7 +1237,6 @@ def export_latest_session():
                     latest_sessions.append(latest_session)
             
             if latest_sessions:
-                # Export interactions from latest sessions only
                 csv_buffer = StringIO()
                 writer = csv.writer(csv_buffer)
                 writer.writerow([
@@ -1262,7 +1265,6 @@ def export_latest_session():
                 
                 zip_file.writestr('Latest_Session_Interactions.csv', csv_buffer.getvalue())
                 
-                # Add session summary
                 csv_buffer = StringIO()
                 writer = csv.writer(csv_buffer)
                 writer.writerow(['Participant_ID', 'Session_ID', 'Trial_Type', 'Version', 'Started_At', 'Total_Interactions'])
@@ -1349,7 +1351,6 @@ def diagnostic_filesystem():
             }
         }
         
-        # Check if folders exist and list contents
         user_data_path = app.config['USER_DATA_BASE_FOLDER']
         if os.path.exists(user_data_path):
             user_data_contents = []
@@ -1363,7 +1364,6 @@ def diagnostic_filesystem():
                 })
             diagnostic_info['folder_contents']['user_data'] = user_data_contents
         
-        # Check disk usage if possible
         try:
             import shutil
             total, used, free = shutil.disk_usage('/')
@@ -1375,7 +1375,6 @@ def diagnostic_filesystem():
         except:
             diagnostic_info['disk_info'] = 'Unable to get disk info'
             
-        # Check recordings in database
         total_recordings = Recording.query.count()
         recordings_with_files = Recording.query.filter(Recording.file_path.isnot(None)).count()
         
@@ -1396,6 +1395,78 @@ def diagnostic_filesystem():
             'message': str(e),
             'error_type': type(e).__name__
         }), 500
+
+# =========================== CLOUD STORAGE ENDPOINTS ===========================
+
+@app.route('/trigger_cloud_upload', methods=['POST'])
+def trigger_cloud_upload():
+    """Manually trigger cloud upload for current participant."""
+    try:
+        participant_id = session.get('participant_id')
+        trial_type = session.get('trial_type')
+        
+        if not participant_id or not trial_type:
+            return jsonify({
+                'status': 'error',
+                'message': 'No active participant session found'
+            }), 400
+        
+        if CLOUD_STORAGE_AVAILABLE:
+            upload_user_data_to_cloud(participant_id, trial_type, USER_DATA_BASE_FOLDER, version="V2", delay_seconds=2)
+            
+            return jsonify({
+                'status': 'success',
+                'message': f'Cloud upload initiated for participant {participant_id}'
+            })
+        else:
+            return jsonify({
+                'status': 'info',
+                'message': 'Cloud storage not configured'
+            })
+        
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+@app.route('/on_page_unload', methods=['POST'])
+def on_page_unload():
+    """Handle page unload event - trigger cloud upload."""
+    try:
+        data = request.get_json() or {}
+        participant_id = session.get('participant_id')
+        trial_type = session.get('trial_type')
+        
+        if participant_id and trial_type:
+            print(f"V2: Page unload detected for participant {participant_id}")
+            
+            try:
+                log_interaction_to_db_only("SYSTEM", "Page_Unload", f"Page unload event for participant {participant_id}")
+            except Exception as log_error:
+                print(f"Error logging page unload: {str(log_error)}")
+            
+            if CLOUD_STORAGE_AVAILABLE:
+                upload_user_data_to_cloud(participant_id, trial_type, USER_DATA_BASE_FOLDER, version="V2", delay_seconds=3)
+            
+            return jsonify({
+                'status': 'success',
+                'message': 'Page unload processed, cloud backup initiated' if CLOUD_STORAGE_AVAILABLE else 'Page unload processed (cloud storage not available)'
+            })
+        else:
+            return jsonify({
+                'status': 'info',
+                'message': 'No active session to backup'
+            })
+            
+    except Exception as e:
+        print(f"Error in V2 page unload handler: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+# =========================== END CLOUD STORAGE ENDPOINTS ===========================
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5001))
