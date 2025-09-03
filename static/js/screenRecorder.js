@@ -5,6 +5,22 @@ let recordingStream = null;
 let recordingStartTime = null;
 let recordingTimer = null;
 
+function checkRecordingStatus() {
+    if (mediaRecorder) {
+        console.log(`V2 Recording Status: ${mediaRecorder.state}, Chunks: ${recordedChunks.length}, IsRecording: ${isRecording}`);
+        if (recordingStartTime) {
+            const elapsed = Math.round((Date.now() - recordingStartTime) / 1000);
+            const minutes = Math.floor(elapsed / 60);
+            const seconds = elapsed % 60;
+            console.log(`V2 Time elapsed: ${minutes}:${seconds.toString().padStart(2, '0')}`);
+        }
+    } else {
+        console.log('V2 No media recorder active');
+    }
+}
+
+window.checkRecordingStatusV2 = checkRecordingStatus;
+
 async function startScreenRecording() {
     try {
         console.log('Starting V2 screen recording for long session...');
@@ -22,37 +38,42 @@ async function startScreenRecording() {
         
         console.log('Got display media stream for V2');
         
-        let mimeType = 'video/webm;codecs=vp8,opus';
+        let mimeType = 'video/webm;codecs=vp8'; 
         if (!MediaRecorder.isTypeSupported(mimeType)) {
-            mimeType = 'video/webm;codecs=vp8';
+            mimeType = 'video/webm';
             if (!MediaRecorder.isTypeSupported(mimeType)) {
-                mimeType = 'video/webm';
+                mimeType = 'video/mp4';
                 if (!MediaRecorder.isTypeSupported(mimeType)) {
-                    mimeType = 'video/mp4';
+                    mimeType = ''; 
                 }
             }
         }
         
-        console.log('V2 using MIME type for recording:', mimeType);
+        console.log('V2 using MIME type for recording:', mimeType || 'browser default');
         
         const options = {
-            mimeType: mimeType,
-            videoBitsPerSecond: 1000000, 
+            videoBitsPerSecond: 500000,
         };
+        
+        if (mimeType) {
+            options.mimeType = mimeType;
+        }
         
         mediaRecorder = new MediaRecorder(recordingStream, options);
         recordedChunks = [];
         
         mediaRecorder.ondataavailable = (event) => {
-            if (event.data.size > 0) {
+            if (event.data && event.data.size > 0) {
                 recordedChunks.push(event.data);
                 console.log(`V2 Recording chunk ${recordedChunks.length}: ${event.data.size} bytes`);
                 
-                if (recordedChunks.length % 10 === 0) {
+                if (recordedChunks.length % 5 === 0) {
                     const totalSize = recordedChunks.reduce((sum, chunk) => sum + chunk.size, 0);
                     const elapsed = Math.round((Date.now() - recordingStartTime) / 1000);
-                    console.log(`V2 Recording progress: ${recordedChunks.length} chunks, ${Math.round(totalSize/1024/1024)}MB, ${elapsed}s elapsed`);
+                    console.log(`V2 Recording progress: ${recordedChunks.length} chunks, ${Math.round(totalSize/1024/1024)}MB, ${elapsed}s`);
                 }
+            } else {
+                console.log('V2 Received empty data chunk - this is normal for continuous recording');
             }
         };
         
@@ -91,16 +112,24 @@ async function startScreenRecording() {
         };
         
 
-        mediaRecorder.start(10000);
+        mediaRecorder.start(); 
         isRecording = true;
-        console.log('V2 Long-duration recording started successfully');
+        console.log('V2 Long-duration recording started successfully (continuous mode)');
         
         recordingTimer = setInterval(() => {
-            const elapsed = Math.round((Date.now() - recordingStartTime) / 1000);
-            const minutes = Math.floor(elapsed / 60);
-            const seconds = elapsed % 60;
-            console.log(`V2 Recording duration: ${minutes}:${seconds.toString().padStart(2, '0')}`);
-        }, 30000);
+            if (isRecording && mediaRecorder && mediaRecorder.state === 'recording') {
+                const elapsed = Math.round((Date.now() - recordingStartTime) / 1000);
+                const minutes = Math.floor(elapsed / 60);
+                const seconds = elapsed % 60;
+                console.log(`V2 Recording active: ${minutes}:${seconds.toString().padStart(2, '0')}`);
+            } else {
+                console.warn('V2 Recording stopped unexpectedly, state:', mediaRecorder?.state);
+                if (recordingTimer) {
+                    clearInterval(recordingTimer);
+                    recordingTimer = null;
+                }
+            }
+        }, 30000); 
         
         recordingStream.getVideoTracks()[0].onended = () => {
             console.log('V2 Screen sharing ended by user');
