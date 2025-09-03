@@ -216,6 +216,8 @@ app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY')
 app.secret_key = os.environ.get('SECRET_KEY', 'fallback-secret-key')
 
+app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB limit for long recordings
+
 db.init_app(app)
 
 with app.app_context():
@@ -521,49 +523,70 @@ def generate_audio(text, file_path):
 @app.route('/save_screen_recording', methods=['POST'])
 def save_screen_recording():
     try:
-        app.logger.info('Received save_screen_recording request')
+        app.logger.info('V2 Received save_screen_recording request')
+        app.logger.info(f"V2 Files received: {list(request.files.keys())}")
+        app.logger.info(f"V2 Form data: {list(request.form.keys())}")
         
         if 'screen_recording' not in request.files:
-            app.logger.error('No screen recording file provided')
+            app.logger.error('V2 No screen recording file provided')
             return jsonify({'error': 'No screen recording file provided'}), 400
             
         screen_recording = request.files['screen_recording']
         trial_type = request.form.get('trial_type')
         participant_id = request.form.get('participant_id')
         
-        app.logger.info(f'Received screen recording request - Participant: {participant_id}, Trial: {trial_type}')
+        app.logger.info(f'V2 Received screen recording request - Participant: {participant_id}, Trial: {trial_type}')
         
         if not all([screen_recording, trial_type, participant_id]):
-            app.logger.error('Missing required parameters')
+            app.logger.error('V2 Missing required parameters')
             return jsonify({'error': 'Missing required parameters'}), 400
             
         task_folder = create_user_folders(participant_id, trial_type)
-        app.logger.info(f'Task folder: {task_folder}')
+        app.logger.info(f'V2 Task folder: {task_folder}')
         
         screen_recordings_dir = os.path.join(task_folder, 'Screen Recordings')
-        app.logger.info(f'Screen recordings directory: {screen_recordings_dir}')
+        app.logger.info(f'V2 Screen recordings directory: {screen_recordings_dir}')
         
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f'screen_recording_{timestamp}.webm'
+        original_filename = screen_recording.filename or 'screen_recording.webm'
+        if original_filename.startswith('screen_recording_') and original_filename.endswith('.webm'):
+            filename = original_filename  
+        else:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename = f'screen_recording_{timestamp}.webm'
+            
         filepath = os.path.join(screen_recordings_dir, filename)
         
-        app.logger.info(f'Saving screen recording to: {filepath}')
+        app.logger.info(f'V2 Saving screen recording to: {filepath}')
         
-        screen_recording.save(filepath)
-        
-        if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
-            app.logger.info(f'Screen recording saved successfully: {filepath}')
-            return jsonify({
-                'status': 'success',
-                'message': 'Screen recording saved successfully',
-                'filepath': filepath
-            })
-        else:
-            app.logger.error('Failed to save screen recording - file not created or empty')
-            return jsonify({'error': 'Failed to save screen recording'}), 500
+        try:
+            screen_recording.save(filepath)
+            
+            if os.path.exists(filepath):
+                file_size = os.path.getsize(filepath)
+                if file_size > 0:
+                    size_mb = round(file_size / (1024 * 1024), 2)
+                    app.logger.info(f'V2 Screen recording saved successfully: {filepath} ({size_mb}MB)')
+                    
+                    return jsonify({
+                        'success': True,
+                        'message': 'V2 Screen recording uploaded successfully',
+                        'filename': filename,
+                        'size_mb': size_mb,
+                        'status': 'success'
+                    }), 200
+                else:
+                    app.logger.error('V2 Screen recording file is empty')
+                    return jsonify({'error': 'Screen recording file is empty'}), 500
+            else:
+                app.logger.error('V2 Screen recording file was not created')
+                return jsonify({'error': 'Failed to save screen recording file'}), 500
+                
+        except Exception as save_error:
+            app.logger.error(f'V2 Error saving file: {str(save_error)}')
+            return jsonify({'error': f'Error saving file: {str(save_error)}'}), 500
         
     except Exception as e:
-        app.logger.error(f"Error saving screen recording: {str(e)}")
+        app.logger.error(f"V2 Error saving screen recording: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/')
