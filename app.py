@@ -1088,130 +1088,50 @@ def export_complete_data():
         zip_buffer = BytesIO()
         files_found = False
         
+        # Folders to include in export
+        folders_to_export = [
+            app.config.get('USER_DATA_BASE_FOLDER'),
+            app.config.get('CONCEPT_AUDIO_FOLDER'),
+            app.config.get('INTRO_AUDIO_FOLDER'),
+        ]
+        # Add screen recordings for each participant/trial if present
+        user_data_base = app.config.get('USER_DATA_BASE_FOLDER', '')
+        if user_data_base and os.path.exists(user_data_base):
+            for participant_id in os.listdir(user_data_base):
+                participant_path = os.path.join(user_data_base, participant_id)
+                if os.path.isdir(participant_path):
+                    for trial_folder in os.listdir(participant_path):
+                        trial_path = os.path.join(participant_path, trial_folder)
+                        screen_recordings_folder = os.path.join(trial_path, 'Screen Recordings')
+                        if os.path.exists(screen_recordings_folder):
+                            folders_to_export.append(screen_recordings_folder)
+        
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-            
-            user_data_path = app.config['USER_DATA_BASE_FOLDER']
-            if os.path.exists(user_data_path):
-                print(f"Checking for User Data files in: {user_data_path}")
-                
-                all_files = []
-                for root, dirs, files in os.walk(user_data_path):
-                    all_files.extend(files)
-                
-                if all_files:  
-                    files_found = True
-                    print(f"Found {len(all_files)} files in user data folder")
-                    
-                    for root, dirs, files in os.walk(user_data_path):
+            for folder in folders_to_export:
+                if folder and os.path.exists(folder):
+                    print(f"Adding files from: {folder}")
+                    for root, dirs, files in os.walk(folder):
                         for file in files:
                             file_path = os.path.join(root, file)
-                            arcname = os.path.relpath(file_path, os.path.dirname(user_data_path))
+                            rel_path = os.path.relpath(file_path, app.config['UPLOAD_FOLDER'])
+                            archive_path = f"Exported_Data/{rel_path}"
                             try:
-                                zip_file.write(file_path, arcname)
-                                print(f"Added: {arcname}")
+                                zip_file.write(file_path, archive_path)
+                                print(f"Added: {archive_path}")
+                                files_found = True
                             except Exception as e:
                                 print(f"Could not add file {file_path}: {str(e)}")
+            # Optionally add logs or other exports here
+            # Add conversation log if available
+            log_path = os.path.join(app.config['UPLOAD_FOLDER'], 'conversation_log.txt')
+            if os.path.exists(log_path):
+                zip_file.write(log_path, 'Exported_Data/conversation_log.txt')
+                files_found = True
             
             if not files_found:
-                print("No user files found - creating database export instead")
-                
-                interactions = Interaction.query.join(Session).order_by(Session.started_at.desc(), Interaction.created_at.asc()).all()
-                if interactions:
-                    csv_buffer = StringIO()
-                    writer = csv.writer(csv_buffer)
-                    writer.writerow([
-                        'Session_ID', 'Participant_ID', 'Trial_Type', 'Version', 
-                        'Speaker', 'Concept_Name', 'Message', 'Attempt_Number', 
-                        'Interaction_Time', 'Session_Started'
-                    ])
-                    
-                    for interaction in interactions:
-                        session = Session.query.filter_by(session_id=interaction.session_id).first()
-                        writer.writerow([
-                            interaction.session_id,
-                            session.participant_id if session else 'Unknown',
-                            session.trial_type if session else 'Unknown',
-                            session.version if session else 'Unknown',
-                            interaction.speaker,
-                            interaction.concept_name,
-                            interaction.message,
-                            interaction.attempt_number,
-                            interaction.created_at,
-                            session.started_at if session else 'Unknown'
-                        ])
-                    
-                    zip_file.writestr('All_Interactions_Data.csv', csv_buffer.getvalue())
-                
-                participants = Participant.query.all()
-                if participants:
-                    csv_buffer = StringIO()
-                    writer = csv.writer(csv_buffer)
-                    writer.writerow(['Participant_ID', 'Total_Sessions', 'Total_Interactions', 'Created_At', 'Trial_Types'])
-                    
-                    for p in participants:
-                        sessions = Session.query.filter_by(participant_id=p.participant_id).all()
-                        sessions_count = len(sessions)
-                        trial_types = list(set([s.trial_type for s in sessions if s.trial_type]))
-                        
-                        total_interactions = 0
-                        for s in sessions:
-                            interactions_count = Interaction.query.filter_by(session_id=s.session_id).count()
-                            total_interactions += interactions_count
-                        
-                        writer.writerow([
-                            p.participant_id, 
-                            sessions_count, 
-                            total_interactions, 
-                            p.created_at,
-                            '; '.join(trial_types)
-                        ])
-                    
-                    zip_file.writestr('Participants_Summary.csv', csv_buffer.getvalue())
-                
-                readme_content = """HAI V2 Data Export - Database Only
-
-IMPORTANT NOTICE:
-================
-This export contains database records only. Audio/video files are not available 
-due to Render's ephemeral storage system.
-
-WHAT'S INCLUDED:
-===============
-- All_Interactions_Data.csv: Complete conversation logs with timestamps
-- Participants_Summary.csv: Participant statistics and trial information
-
-MISSING DATA:
-=============
-- Audio recordings (user voice inputs)
-- AI-generated audio responses
-- Screen recordings
-- Log files
-
-For future data collection, consider implementing persistent storage 
-(AWS S3, Google Cloud, etc.) to preserve audio/video files.
-
-Export generated: """ + datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                
-                zip_file.writestr('README.txt', readme_content)
-            
-            else:
-                try:
-                    participants = Participant.query.all()
-                    
-                    csv_buffer = StringIO()
-                    writer = csv.writer(csv_buffer)
-                    writer.writerow(['participant_id', 'created_at', 'session_count', 'interaction_count', 'recording_count'])
-                    
-                    for p in participants:
-                        session_count = Session.query.filter_by(participant_id=p.participant_id).count()
-                        interaction_count = Interaction.query.join(Session).filter(Session.participant_id == p.participant_id).count()
-                        recording_count = Recording.query.join(Session).filter(Session.participant_id == p.participant_id).count()
-                        
-                        writer.writerow([p.participant_id, p.created_at, session_count, interaction_count, recording_count])
-                    
-                    zip_file.writestr('Database_Summary.csv', csv_buffer.getvalue())
-                except Exception as db_error:
-                    print(f"Database summary not available: {str(db_error)}")
+                print("No user files found for export.")
+                # Optionally, you can return a 404 or an empty zip
+                pass
         
         zip_buffer.seek(0)
         
