@@ -112,11 +112,11 @@ async function startScreenRecording() {
         };
         
 
-        mediaRecorder.start(); 
-        isRecording = true;
-        console.log('V2 Long-duration recording started successfully (continuous mode)');
+    mediaRecorder.start(10000); // 10 seconds timeslice for robust long recordings
+    isRecording = true;
+    console.log('V2 Long-duration recording started successfully (continuous mode, 10s chunks)');
         
-        recordingTimer = setInterval(() => {
+    recordingTimer = setInterval(() => {
             if (isRecording && mediaRecorder && mediaRecorder.state === 'recording') {
                 const elapsed = Math.round((Date.now() - recordingStartTime) / 1000);
                 const minutes = Math.floor(elapsed / 60);

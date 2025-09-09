@@ -346,8 +346,13 @@ def create_user_folders(participant_id, trial_type):
     return task_folder
 
 def get_audio_filename(prefix, participant_id, trial_type, attempt_number, extension='.mp3'):
-    """Generate a unique audio filename with participant ID and attempt number."""
-    return f"{prefix}_{attempt_number}_{participant_id}{extension}"
+    """Generate a unique audio filename with participant ID, concept name, and attempt number."""
+    # Accept concept_name as an optional kwarg for backward compatibility
+    import inspect
+    frame = inspect.currentframe().f_back
+    concept_name = frame.f_locals.get('concept_name', None)
+    concept_part = f"_{secure_filename(concept_name)}" if concept_name else ""
+    return f"{prefix}{concept_part}_{attempt_number}_{participant_id}{extension}"
 
 def get_general_audio_filename(prefix, concept_name=None, extension='.mp3'):
     """Generate a filename for general audio (intro, concept intros)."""
@@ -1113,7 +1118,11 @@ def export_complete_data():
                     for root, dirs, files in os.walk(folder):
                         for file in files:
                             file_path = os.path.join(root, file)
-                            rel_path = os.path.relpath(file_path, app.config['UPLOAD_FOLDER'])
+                            # Use correct rel_path for user audio files
+                            if folder == app.config['USER_DATA_BASE_FOLDER']:
+                                rel_path = os.path.relpath(file_path, app.config['USER_DATA_BASE_FOLDER'])
+                            else:
+                                rel_path = os.path.relpath(file_path, app.config['UPLOAD_FOLDER'])
                             archive_path = f"Exported_Data/{rel_path}"
                             try:
                                 zip_file.write(file_path, archive_path)
@@ -1121,8 +1130,6 @@ def export_complete_data():
                                 files_found = True
                             except Exception as e:
                                 print(f"Could not add file {file_path}: {str(e)}")
-            # Optionally add logs or other exports here
-            # Add conversation log if available
             log_path = os.path.join(app.config['UPLOAD_FOLDER'], 'conversation_log.txt')
             if os.path.exists(log_path):
                 zip_file.write(log_path, 'Exported_Data/conversation_log.txt')
@@ -1130,7 +1137,6 @@ def export_complete_data():
             
             if not files_found:
                 print("No user files found for export.")
-                # Optionally, you can return a 404 or an empty zip
                 pass
         
         zip_buffer.seek(0)
