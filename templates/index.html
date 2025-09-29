@@ -115,7 +115,7 @@
               let conceptBubbleTimeout = null;
               let isSubmitting = false;
   
-              loadPDF();
+              // loadPDF is called later once setup is complete to avoid race conditions
               
               function showConceptBubble(text) {
                   conceptIndicator.textContent = text;
@@ -336,30 +336,41 @@
               function renderPage(num) {
                   pageRendering = true;
                   loadingSpinner.style.display = 'block';
-                  
+
                   pdfDoc.getPage(num).then(function(page) {
                       const viewport = page.getViewport({ scale: scale });
-                      pdfCanvas.height = viewport.height;
-                      pdfCanvas.width = viewport.width;
-                      
+
+                      const outputScale = window.devicePixelRatio || 1;
+                      const canvasWidth = Math.floor(viewport.width * outputScale);
+                      const canvasHeight = Math.floor(viewport.height * outputScale);
+
+                      pdfCanvas.width = canvasWidth;
+                      pdfCanvas.height = canvasHeight;
+
+                      pdfCanvas.style.width = Math.round(viewport.width) + 'px';
+                      pdfCanvas.style.height = Math.round(viewport.height) + 'px';
+
+                      const ctx = pdfCanvas.getContext('2d');
+                      ctx.setTransform(outputScale, 0, 0, outputScale, 0, 0);
+
                       const renderContext = {
-                          canvasContext: pdfCanvas.getContext('2d'),
+                          canvasContext: ctx,
                           viewport: viewport
                       };
-                      
+
                       const renderTask = page.render(renderContext);
-                      
+
                       renderTask.promise.then(function() {
                           pageRendering = false;
                           loadingSpinner.style.display = 'none';
-                          
+
                           if (pageNumPending !== null) {
                               renderPage(pageNumPending);
                               pageNumPending = null;
                           }
                       });
                   });
-                  
+
                   currentPageNum.textContent = num;
                   currentPage = num;
                   updateConceptIndicator();
