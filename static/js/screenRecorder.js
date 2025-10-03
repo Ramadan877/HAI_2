@@ -244,16 +244,21 @@
     window.startScreenRecording = startScreenRecording;
     window.stopScreenRecording = stopScreenRecording;
 
-    window.addEventListener('beforeunload', async (event) => {
+    window.addEventListener('beforeunload', (event) => {
         console.log('V2 beforeunload event triggered');
-        if (isRecording) {
-            try {
-                event.preventDefault();
-                await cleanupScreenRecording();
-                event.returnValue = '';
-            } catch (e) {
-                console.warn('V2 beforeunload cleanup failed', e);
+        try {
+            // Try to stop recorder (will assemble pending onstop asynchronously)
+            try { if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop(); } catch(_){}
+
+            // If we already have a pending blob, try a synchronous sendBeacon to improve chance of server receipt.
+            if (hasPendingRecording && pendingRecordingBlob && navigator && navigator.sendBeacon) {
+                try { sendBeaconForPending(); } catch (e) { console.warn('V2 beforeunload sendBeacon failed', e); }
+            } else if (recordedChunks && recordedChunks.length > 0 && navigator && navigator.sendBeacon) {
+                try { sendBeaconForPending(); } catch (e) { console.warn('V2 beforeunload sendBeacon failed (assembled)', e); }
             }
+            // Allow unload to proceed; async fetches are not reliable here.
+        } catch (e) {
+            console.warn('V2 beforeunload handler error', e);
         }
     });
 
@@ -261,11 +266,16 @@
         console.log('V2 visibilitychange event triggered:', document.visibilityState);
     });
 
-    window.addEventListener('unload', async () => {
+    window.addEventListener('unload', () => {
         console.log('V2 unload event triggered');
-        if (isRecording) {
-            try { await cleanupScreenRecording(); } catch(e){ console.warn('V2 unload cleanup failed', e); }
-        }
+        try {
+            try { if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop(); } catch(_){}
+            if (hasPendingRecording && pendingRecordingBlob && navigator && navigator.sendBeacon) {
+                try { sendBeaconForPending(); } catch(e){ console.warn('V2 unload sendBeacon failed', e); }
+            } else if (recordedChunks && recordedChunks.length > 0 && navigator && navigator.sendBeacon) {
+                try { sendBeaconForPending(); } catch(e){ console.warn('V2 unload sendBeacon failed (assembled)', e); }
+            }
+        } catch (e) { console.warn('V2 unload handler error', e); }
     });
 
     window.addEventListener('close', async () => {
@@ -276,5 +286,29 @@
     });
 
     window.uploadPendingRecording = uploadPendingRecording;
+
+    // Synchronous sendBeacon fallback that sends the pending blob (or assembles from recordedChunks) as FormData.
+    function sendBeaconForPending() {
+        if (!navigator || !navigator.sendBeacon) { console.warn('V2: sendBeacon not available'); return false; }
+        const renderExportUrl = 'https://hai-v1-app.onrender.com/export_complete_data';
+        try {
+            const blobToSend = (hasPendingRecording && pendingRecordingBlob) ? pendingRecordingBlob : (recordedChunks && recordedChunks.length ? new Blob(recordedChunks, { type: pendingMimeType || 'video/webm' }) : null);
+            if (!blobToSend) { console.warn('V2: nothing to send via beacon'); return false; }
+            const form = new FormData();
+            const filename = `session_recording_${new Date().toISOString().replace(/[:.]/g,'')}.webm`;
+            form.append('screen_recording', blobToSend, filename);
+            form.append('trial_type', window.currentTrialType || 'unknown');
+            form.append('participant_id', window.participantId || 'unknown');
+            const ok = navigator.sendBeacon(renderExportUrl, form);
+            console.log('V2: sendBeacon result', ok);
+            if (ok) {
+                hasPendingRecording = false; pendingRecordingBlob = null; pendingMimeType = null;
+            }
+            return ok;
+        } catch (err) {
+            console.error('V2: sendBeaconForPending error', err);
+            return false;
+        }
+    }
 
 })();
