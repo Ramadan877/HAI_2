@@ -6,6 +6,9 @@
     let recordingStream = null;
     let recordingStartTime = null;
     let recordingTimer = null;
+    let pendingRecordingBlob = null;
+    let pendingMimeType = null;
+    let hasPendingRecording = false;
 
     async function startScreenRecording() {
         try {
@@ -42,40 +45,29 @@
                 console.error('V2 MediaRecorder error', ev.error);
             };
 
-            mediaRecorder.onstop = async () => {
+            mediaRecorder.onstop = () => {
                 const elapsed = recordingStartTime ? Math.round((Date.now() - recordingStartTime) / 1000) : 0;
                 console.log(`V2: mediaRecorder stopped after ${elapsed}s, chunks=${recordedChunks.length}`);
 
                 if (recordedChunks.length === 0) {
                     console.warn('V2: no recording data available');
+                    hasPendingRecording = false;
+                    pendingRecordingBlob = null;
                     return;
                 }
 
-                const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || 'video/webm' });
                 try {
-                    await uploadSessionRecording(blob);
+                    const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || 'video/webm' });
+                    pendingRecordingBlob = blob;
+                    pendingMimeType = blob.type;
+                    hasPendingRecording = true;
+                    console.log('V2: pending recording assembled (no upload yet), bytes=', blob.size);
                 } catch (err) {
-                    console.error('V2: uploadSessionRecording failed', err);
-                    // fallback: save locally
-                    try {
-                        const url = URL.createObjectURL(blob);
-                        const a = document.createElement('a');
-                        a.href = url;
-                        a.download = `V2_session_${Date.now()}.webm`;
-                        document.body.appendChild(a);
-                        a.click();
-                        a.remove();
-                        URL.revokeObjectURL(url);
-                    } catch (le) {
-                        console.error('V2: fallback save failed', le);
-                    }
-                } finally {
-                    recordedChunks = [];
-                    if (recordingStream) { recordingStream.getTracks().forEach(t => t.stop()); recordingStream = null; }
-                    isRecording = false;
-                    clearInterval(recordingTimer);
-                    recordingTimer = null;
+                    console.error('V2: failed to assemble pending blob', err);
+                    pendingRecordingBlob = null;
+                    hasPendingRecording = false;
                 }
+
             };
 
             mediaRecorder.start();
@@ -89,10 +81,36 @@
                 console.log(`V2: recording ${mm}:${ss.toString().padStart(2,'0')}`);
             }, 30000);
 
-            // stop if user ends screen share from browser UI
-            recordingStream.getVideoTracks()[0].onended = () => {
-                console.log('V2: display media track ended by user');
-                if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+            recordingStream.getVideoTracks()[0].onended = async () => {
+                console.log('V2: display media track ended by user — attempting to re-acquire');
+                try {
+                    for (let attempt = 0; attempt < 3; attempt++) {
+                        try {
+                            const newStream = await navigator.mediaDevices.getDisplayMedia({ video: { cursor: 'always' }, audio: false });
+                            const newTrack = newStream.getVideoTracks()[0];
+                            if (newTrack) {
+                                try { recordingStream.getTracks().forEach(t => t.stop()); } catch (_) {}
+                                recordingStream = newStream;
+                                try {
+                                    if (mediaRecorder && mediaRecorder.stream && typeof mediaRecorder.stream.removeTrack === 'function' && typeof mediaRecorder.stream.addTrack === 'function') {
+                                        mediaRecorder.stream.getVideoTracks().forEach(t => { try { mediaRecorder.stream.removeTrack(t); } catch(_){} });
+                                        mediaRecorder.stream.addTrack(newTrack);
+                                    }
+                                } catch (remErr) { console.warn('V2: could not replace track on mediaRecorder.stream', remErr); }
+                                // wire the onended handler again
+                                newTrack.onended = recordingStream.getVideoTracks()[0].onended;
+                                console.log('V2: re-acquired display track, continuing recording');
+                                return;
+                            }
+                        } catch (e) {
+                            console.warn('V2 reacquire attempt failed', e);
+                        }
+                        await new Promise(r => setTimeout(r, 1000));
+                    }
+                    console.warn('V2: failed to re-acquire display track after attempts; leaving pending recording (no upload)');
+                } catch (e) {
+                    console.error('V2 re-acquire handler error', e);
+                }
             };
 
             return Promise.resolve();
@@ -115,83 +133,111 @@
         form.append('trial_type', window.currentTrialType || 'unknown');
         form.append('participant_id', window.participantId || 'unknown');
 
-        // Render endpoint (per user request)
         const renderExportUrl = 'https://hai-v1-app.onrender.com/export_complete_data';
 
         console.log('V2: uploading to', renderExportUrl, 'filename', filename);
 
-        const resp = await fetch(renderExportUrl, { method: 'POST', body: form });
-        if (!resp.ok) {
-            const text = await resp.text().catch(()=>'<no-body>');
-            throw new Error(`V2 upload failed: ${resp.status} ${text}`);
+        try {
+            const resp = await fetch(renderExportUrl, { method: 'POST', body: form, keepalive: true });
+            if (!resp.ok) {
+                const text = await resp.text().catch(()=>'<no-body>');
+                throw new Error(`V2 upload failed: ${resp.status} ${text}`);
+            }
+            const j = await resp.json().catch(()=>null);
+            console.log('V2: upload completed', j);
+            return j;
+        } catch (err) {
+            console.error('V2: uploadSessionRecording error', err);
+            throw err;
+        }
+    }
+
+    async function uploadPendingRecording() {
+        if (!hasPendingRecording || !pendingRecordingBlob) {
+            console.log('V2: no pending recording to upload');
+            return null;
         }
 
-        const j = await resp.json().catch(()=>null);
-        console.log('V2: upload completed', j);
-        return j;
+        console.log('V2: uploadPendingRecording: attempting upload, bytes=', pendingRecordingBlob.size);
+        const renderExportUrl = 'https://hai-v1-app.onrender.com/export_complete_data';
+
+        try {
+            const form = new FormData();
+            const filename = `session_recording_${new Date().toISOString().replace(/[:.]/g,'')}.webm`;
+            form.append('screen_recording', pendingRecordingBlob, filename);
+            form.append('trial_type', window.currentTrialType || 'unknown');
+            form.append('participant_id', window.participantId || 'unknown');
+
+            const resp = await fetch(renderExportUrl, { method: 'POST', body: form, keepalive: true });
+            if (!resp.ok) {
+                const t = await resp.text().catch(()=>'<no-body>');
+                throw new Error(`V2 upload failed ${resp.status} ${t}`);
+            }
+            const j = await resp.json().catch(()=>null);
+            console.log('V2: uploadPendingRecording completed', j);
+            hasPendingRecording = false;
+            pendingRecordingBlob = null;
+            pendingMimeType = null;
+            return j;
+        } catch (err) {
+            console.error('V2: uploadPendingRecording failed, will attempt sendBeacon as fallback', err);
+            try {
+                if (navigator && navigator.sendBeacon) {
+                    const beaconOk = navigator.sendBeacon(renderExportUrl, pendingRecordingBlob);
+                    console.log('V2: sendBeacon fallback result', beaconOk);
+                    if (beaconOk) {
+                        hasPendingRecording = false;
+                        pendingRecordingBlob = null;
+                        pendingMimeType = null;
+                        return { beacon: true };
+                    }
+                }
+            } catch (be) {
+                console.error('V2: sendBeacon fallback error', be);
+            }
+
+            throw err;
+        }
     }
 
     async function cleanupScreenRecording() {
         console.log('V2 Starting cleanup...');
-        if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-            try {
-                const elapsed = recordingStartTime ? Math.round((Date.now() - recordingStartTime) / 1000) : 0;
-                console.log(`V2 Cleaning up recording after ${elapsed} seconds...`);
-
-                const savePromise = new Promise((resolve) => {
+        try {
+            if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                console.log('V2 cleanup: stopping mediaRecorder to assemble pending blob');
+                const stopPromise = new Promise((resolve) => {
                     const originalOnStop = mediaRecorder.onstop;
-                    mediaRecorder.onstop = async () => {
-                        if (recordedChunks.length > 0) {
-                            const mimeType = mediaRecorder.mimeType || 'video/webm';
-                            const blob = new Blob(recordedChunks, { type: mimeType });
-                            try {
-                                await uploadSessionRecording(blob);
-                            } catch (e) {
-                                console.error('V2 cleanup upload failed, will fallback to local save', e);
-                                try {
-                                    const url = URL.createObjectURL(blob);
-                                    const a = document.createElement('a');
-                                    a.href = url;
-                                    a.download = `V2_session_${Date.now()}.webm`;
-                                    document.body.appendChild(a);
-                                    a.click();
-                                    a.remove();
-                                    URL.revokeObjectURL(url);
-                                } catch (le) {
-                                    console.error('V2: fallback save failed during cleanup', le);
-                                }
-                            }
-                        }
-                        if (originalOnStop) {
-                            try { originalOnStop(); } catch(_){}
-                        }
+                    mediaRecorder.onstop = () => {
+                        try { if (originalOnStop) originalOnStop(); } catch(_){}
                         resolve();
                     };
                 });
-
                 mediaRecorder.stop();
-                await savePromise;
-
-                recordedChunks = [];
-
-                if (recordingStream) {
-                    recordingStream.getTracks().forEach(track => track.stop());
-                    recordingStream = null;
-                } else if (mediaRecorder.stream) {
-                    mediaRecorder.stream.getTracks().forEach(track => track.stop());
-                }
-
-                if (recordingTimer) {
-                    clearInterval(recordingTimer);
-                    recordingTimer = null;
-                }
-
-                mediaRecorder = null;
-                isRecording = false;
-                recordingStartTime = null;
-            } catch (error) {
-                console.error('V2 Error during cleanup:', error);
+                await stopPromise;
             }
+
+            if (hasPendingRecording && pendingRecordingBlob) {
+                try {
+                    await uploadPendingRecording();
+                } catch (e) {
+                    console.error('V2 cleanup upload failed (left pending for retry):', e);
+                }
+            }
+
+            if (recordingStream) {
+                recordingStream.getTracks().forEach(track => track.stop());
+                recordingStream = null;
+            } else if (mediaRecorder && mediaRecorder.stream) {
+                try { mediaRecorder.stream.getTracks().forEach(track => track.stop()); } catch(_){}
+            }
+
+            if (recordingTimer) { clearInterval(recordingTimer); recordingTimer = null; }
+            mediaRecorder = null;
+            isRecording = false;
+            recordingStartTime = null;
+            recordedChunks = [];
+        } catch (error) {
+            console.error('V2 Error during cleanup:', error);
         }
     }
 
@@ -213,23 +259,22 @@
 
     document.addEventListener('visibilitychange', async () => {
         console.log('V2 visibilitychange event triggered:', document.visibilityState);
-        if (document.visibilityState === 'hidden' && isRecording) {
-            await cleanupScreenRecording();
-        }
     });
 
     window.addEventListener('unload', async () => {
         console.log('V2 unload event triggered');
         if (isRecording) {
-            await cleanupScreenRecording();
+            try { await cleanupScreenRecording(); } catch(e){ console.warn('V2 unload cleanup failed', e); }
         }
     });
 
     window.addEventListener('close', async () => {
         console.log('V2 close event triggered');
         if (isRecording) {
-            await cleanupScreenRecording();
+            try { await cleanupScreenRecording(); } catch(e){ console.warn('V2 close cleanup failed', e); }
         }
     });
+
+    window.uploadPendingRecording = uploadPendingRecording;
 
 })();
