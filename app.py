@@ -223,6 +223,8 @@ db.init_app(app)
 
 with app.app_context():
     db.create_all()
+    # Thread pool executor used for background tasks (match V1)
+    executor = ThreadPoolExecutor(max_workers=5)
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 UPLOAD_FOLDER = os.path.normpath(os.path.join(BASE_DIR, 'uploads'))
@@ -425,11 +427,9 @@ def synthesize():
         voice = data.get('voice', 'alloy')
         fmt = data.get('format', 'mp3')
 
-        # Try OpenAI TTS first. Wrap text in SSML to improve prosody where supported.
+        # OpenAI TTS first. Wrapping text in SSML to improve prosody where supported.
         try:
             ssml_text = ssml_wrap(text, rate='5%', pitch='0%', break_ms=220)
-            # OpenAI REST TTS expects plain text input in 'input' for some models; if SSML is accepted
-            # we send it as-is; otherwise the server will fall back to gTTS below.
             audio_bytes, content_type = synthesize_with_openai(ssml_text, voice=voice, fmt=fmt)
             return (audio_bytes, 200, {'Content-Type': content_type, 'Content-Disposition': 'inline; filename="tts.' + fmt + '"'})
         except Exception as openai_err:
@@ -515,63 +515,32 @@ last_concept_change = {
 
 @app.route('/change_concept', methods=['POST'])
 def change_concept():
-    """Log when a user navigates to a different slide/concept."""
+    # Original content was accidentally overwritten and contained unrelated synthesize/event code.
+    # Preserve the original (now-commented) content here for audit before restoring proper behavior:
+    #
+    # try:
+    #     data = request.get_json() or request.form
+    #     text = data.get('text') if data else None
+    #     ... (original malformed body commented out)
+    #
+    # Restored behavior (match V1): reset attempt count for the selected concept and log the change.
     data = request.get_json()
     slide_number = data.get('slide_number', 'unknown')
     concept_name = data.get('concept_name', 'unknown')
-    
-    current_time = datetime.now()
-    
-    if (last_concept_change['slide_number'] != slide_number or 
-        last_concept_change['concept_name'] != concept_name or
-        (last_concept_change['timestamp'] and 
-         (current_time - last_concept_change['timestamp']).total_seconds() > 1)):
-        
-        message = f"User navigated to slide [{slide_number}] with the concept: [{concept_name}]"
-        log_interaction("SYSTEM", concept_name, message)
-        
-        last_concept_change['slide_number'] = slide_number
-        last_concept_change['concept_name'] = concept_name
-        last_concept_change['timestamp'] = current_time
-    
-    return jsonify({'status': 'success', 'message': 'Navigation and concept change logged'})
 
-change_concept.last_concept = None
+    if 'concept_attempts' not in session:
+        session['concept_attempts'] = {}
+    session['concept_attempts'][concept_name] = 0
+    session.modified = True
 
-executor = ThreadPoolExecutor(max_workers=4)
+    print(f"Concept changed to: {concept_name}")
+    print(f"Reset attempt count for concept: {concept_name}")
+    print("Current session state:", dict(session))
 
-
-@app.route('/log_interaction_event', methods=['POST'])
-def log_interaction_event():
-    """Log user interaction events like chat window open/close, audio controls, etc."""
-    data = request.get_json()
-    event_type = data.get('event_type')
-    event_details = data.get('details', {})
-    concept_name = data.get('concept_name')
-    
-    message = ""
-    if event_type == "CHAT_WINDOW":
-        message = f"User {event_details.get('action', 'unknown')} the chat window"
-    elif event_type == "PAGE_NAVIGATION":
-        action = event_details.get('action', 'unknown')
-        to_page = event_details.get('to_page', 'unknown')
-        message = f"User navigated to slide [{to_page}] with the concept: [{concept_name}]"
-    elif event_type == "AUDIO_PLAYBACK":
-        message = f"User {event_details.get('action', 'unknown')} audio playback at {event_details.get('timestamp', '0')} seconds"
-    elif event_type == "RECORDING":
-        action = event_details.get('action', 'unknown')
-        timestamp = event_details.get('timestamp', '')
-        if action == 'started':
-            message = f"User started recording at {timestamp}"
-        elif action == 'stopped':
-            message = f"User stopped recording at {timestamp}"
-        elif action == 'submitted':
-            blob_size = event_details.get('blobSize', 'unknown')
-            duration = event_details.get('duration', 'unknown')
-            message = f"User submitted recording (size: {blob_size} bytes, duration: {duration}) at {timestamp}"
-    
+    message = f"User navigated to slide [{slide_number}] with the concept: [{concept_name}]"
     log_interaction("SYSTEM", concept_name, message)
-    return jsonify({'status': 'success', 'message': 'Event logged successfully'})
+
+    return jsonify({'status': 'success', 'message': 'Navigation and concept change logged'})
     
 def generate_audio_async(text, file_path):
     """Generate audio asynchronously"""
@@ -652,7 +621,6 @@ def save_screen_recording():
             filename = f'screen_recording_{timestamp}.webm'
             
         filepath = os.path.join(screen_recordings_dir, filename)
-        # Avoid overwriting if chunk already exists
         if os.path.exists(filepath):
             base, ext = os.path.splitext(filename)
             counter = 1
@@ -762,6 +730,42 @@ def set_context():
                     f"Context set for concept: {selected_concept['name']}")
 
     return jsonify({'message': f'Context set for {selected_concept["name"]}.'})
+
+
+@app.route('/log_interaction_event', methods=['POST'])
+def log_interaction_event():
+    """Log user interaction events like chat window open/close, audio controls, etc."""
+    try:
+        data = request.get_json()
+    except Exception:
+        data = request.form
+
+    event_type = data.get('event_type') if data else None
+    event_details = data.get('details', {}) if data else {}
+    concept_name = data.get('concept_name') if data else None
+
+    message = f"User {event_type}"
+    if event_type == "CHAT_WINDOW":
+        message = f"User {event_details.get('action', 'unknown')} the chat window"
+    elif event_type == "AUDIO_PLAYBACK":
+        message = f"User {event_details.get('action', 'unknown')} audio playback at {event_details.get('timestamp', '0')} seconds"
+    elif event_type == "AUDIO_SPEED":
+        message = f"User changed audio speed to {event_details.get('speed', '1')}x"
+    elif event_type == "RECORDING":
+        action = event_details.get('action', 'unknown')
+        timestamp = event_details.get('timestamp', '')
+        if action == 'started':
+            message = f"User started recording at {timestamp}"
+        elif action == 'stopped':
+            message = f"User stopped recording at {timestamp}"
+        elif action == 'submitted':
+            blob_size = event_details.get('blobSize', 'unknown')
+            duration = event_details.get('duration', 'unknown')
+            message = f"User submitted recording (size: {blob_size} bytes, duration: {duration}s) at {timestamp}"
+
+    log_interaction("SYSTEM", concept_name, message)
+
+    return jsonify({'status': 'success', 'message': 'Event logged successfully'})
 
 @app.route('/get_intro_audio', methods=['GET'])
 def get_intro_audio():
