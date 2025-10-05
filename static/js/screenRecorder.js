@@ -9,6 +9,89 @@
     let pendingRecordingBlob = null;
     let pendingMimeType = null;
     let hasPendingRecording = false;
+    let pendingRecordingId = null; // id in IndexedDB when saved
+
+    // --- IndexedDB helpers (simple wrapper) ---
+    function openDB() {
+        return new Promise((resolve, reject) => {
+            try {
+                const req = indexedDB.open('HAI_Recordings', 1);
+                req.onupgradeneeded = (e) => {
+                    const db = e.target.result;
+                    if (!db.objectStoreNames.contains('recordings')) {
+                        db.createObjectStore('recordings', { keyPath: 'id', autoIncrement: true });
+                    }
+                };
+                req.onsuccess = () => resolve(req.result);
+                req.onerror = () => reject(req.error || new Error('IndexedDB open error'));
+            } catch (err) { reject(err); }
+        });
+    }
+
+    function saveRecordingToDB(blob, meta) {
+        return openDB().then(db => new Promise((resolve, reject) => {
+            try {
+                const tx = db.transaction('recordings', 'readwrite');
+                const store = tx.objectStore('recordings');
+                const rec = { blob: blob, meta: meta || {}, created: Date.now() };
+                const req = store.add(rec);
+                req.onsuccess = () => { const id = req.result; db.close(); resolve(id); };
+                req.onerror = () => { db.close(); reject(req.error || new Error('add failed')); };
+            } catch (err) { reject(err); }
+        }));
+    }
+
+    function getAllRecordingsFromDB() {
+        return openDB().then(db => new Promise((resolve, reject) => {
+            try {
+                const tx = db.transaction('recordings', 'readonly');
+                const store = tx.objectStore('recordings');
+                const req = store.getAll();
+                req.onsuccess = () => { db.close(); resolve(req.result || []); };
+                req.onerror = () => { db.close(); reject(req.error || new Error('getAll failed')); };
+            } catch (err) { reject(err); }
+        }));
+    }
+
+    function deleteRecordingFromDB(id) {
+        return openDB().then(db => new Promise((resolve, reject) => {
+            try {
+                const tx = db.transaction('recordings', 'readwrite');
+                const store = tx.objectStore('recordings');
+                const req = store.delete(id);
+                req.onsuccess = () => { db.close(); resolve(true); };
+                req.onerror = () => { db.close(); reject(req.error || new Error('delete failed')); };
+            } catch (err) { reject(err); }
+        }));
+    }
+
+    // Upload queued DB recordings (retry loop)
+    async function processPendingRecordings() {
+        try {
+            const rows = await getAllRecordingsFromDB();
+            if (!rows || rows.length === 0) return;
+            console.log('V2: processPendingRecordings found', rows.length, 'items');
+            for (const r of rows) {
+                try {
+                    const form = new FormData();
+                    const filename = r.meta && r.meta.filename ? r.meta.filename : `session_recording_${new Date(r.created).toISOString().replace(/[:.]/g,'')}.webm`;
+                    form.append('screen_recording', r.blob, filename);
+                    form.append('trial_type', r.meta && r.meta.trial_type ? r.meta.trial_type : (window.currentTrialType || 'unknown'));
+                    form.append('participant_id', r.meta && r.meta.participant_id ? r.meta.participant_id : (window.participantId || 'unknown'));
+                    const renderExportUrl = 'https://hai-v1-app.onrender.com/export_complete_data';
+                    const resp = await fetch(renderExportUrl, { method: 'POST', body: form });
+                    if (resp && resp.ok) {
+                        console.log('V2: uploaded pending recording id=', r.id);
+                        await deleteRecordingFromDB(r.id);
+                    } else {
+                        console.warn('V2: server rejected pending recording id=', r.id, resp && resp.status);
+                    }
+                } catch (err) {
+                    console.warn('V2: failed to upload pending recording id=', r.id, err);
+                }
+            }
+        } catch (err) { console.error('V2: processPendingRecordings error', err); }
+    }
 
     async function startScreenRecording() {
         try {
@@ -62,6 +145,11 @@
                     pendingMimeType = blob.type;
                     hasPendingRecording = true;
                     console.log('V2: pending recording assembled (no upload yet), bytes=', blob.size);
+                    // Save to IndexedDB for reliable persistence and retry on next load
+                    try {
+                        const meta = { filename: `session_recording_${new Date().toISOString().replace(/[:.]/g,'')}.webm`, trial_type: window.currentTrialType || 'unknown', participant_id: window.participantId || 'unknown' };
+                        saveRecordingToDB(blob, meta).then(id => { pendingRecordingId = id; console.log('V2: saved pending recording to DB id=', id); }).catch(dbErr => { console.warn('V2: failed to save pending recording to DB', dbErr); });
+                    } catch (dbEx) { console.warn('V2: IndexedDB save error', dbEx); }
                 } catch (err) {
                     console.error('V2: failed to assemble pending blob', err);
                     pendingRecordingBlob = null;
@@ -236,6 +324,8 @@
             isRecording = false;
             recordingStartTime = null;
             recordedChunks = [];
+            // Attempt to process any DB-persisted pending recordings (retry uploads)
+            try { processPendingRecordings().catch(()=>{}); } catch(_){}
         } catch (error) {
             console.error('V2 Error during cleanup:', error);
         }
@@ -312,3 +402,6 @@
     }
 
 })();
+
+// On load, attempt to process any pending recordings saved to IndexedDB
+try { if (typeof window !== 'undefined') { window.addEventListener('load', () => { try { processPendingRecordings().catch(()=>{}); } catch(_){} }); } } catch(_){}
