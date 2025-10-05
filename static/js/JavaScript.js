@@ -538,22 +538,48 @@ document.addEventListener("DOMContentLoaded", function () {
                
                if (data.ai_audio_url) {
                    stopMeteorOrbit();
-                   
-                   aiAudio.src = data.ai_audio_url;
-                   aiAudio.play()
-                       .then(() => {
+
+                   // Old behavior: set aiAudio.src to the server-side audio file and play.
+                   // aiAudio.src = data.ai_audio_url;
+                   // aiAudio.play().then(() => { activateSiriOrb(); siriOrb.style.boxShadow = "0 0 20px 5px rgba(0, 128, 255, 0.7)"; }).catch(e => console.error('Error playing AI response:', e));
+                   // aiAudio.onended = function() { siriOrb.style.boxShadow = 'none'; };
+
+                   // New behavior: synthesize the full AI response text server-side (via /synthesize), fetch the audio bytes,
+                   // decode with AudioContext and play as a single continuous buffer to avoid mid-sentence pauses.
+                   try {
+                       const text = data.response || '';
+                       fetch('/synthesize', {
+                           method: 'POST',
+                           headers: { 'Content-Type': 'application/json' },
+                           body: JSON.stringify({ text: text, format: 'mp3' })
+                       }).then(res => {
+                           if (!res.ok) throw new Error('TTS request failed');
+                           return res.arrayBuffer();
+                       }).then(arrayBuffer => {
+                           const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                           return audioCtx.decodeAudioData(arrayBuffer).then(audioBuffer => ({ audioCtx, audioBuffer }));
+                       }).then(({ audioCtx, audioBuffer }) => {
+                           const src = audioCtx.createBufferSource();
+                           src.buffer = audioBuffer;
+                           src.connect(audioCtx.destination);
+                           src.onended = () => { siriOrb.style.boxShadow = 'none'; };
                            activateSiriOrb();
                            siriOrb.style.boxShadow = "0 0 20px 5px rgba(0, 128, 255, 0.7)";
-                       })
-                       .catch(error => console.error("Error playing AI response:", error));
-                       
-                   aiAudio.onended = function() {
-                       siriOrb.style.boxShadow = "none";
-                   };
+                           src.start(0);
+                       }).catch(err => {
+                           console.error('TTS/playback error, falling back to server file:', err);
+                           // fallback to the old server audio file playback
+                           aiAudio.src = data.ai_audio_url;
+                           aiAudio.play().catch(e => console.error('Fallback play failed', e));
+                       });
+                   } catch (err) {
+                       console.error('Error invoking synthesize:', err);
+                       stopMeteorOrbit();
+                   }
                } else {
                    console.error("AI audio URL missing from response");
-                    stopMeteorOrbit();
-                }
+                   stopMeteorOrbit();
+               }
             } catch (error) {
                 console.error("Error processing recording:", error);
                 stopMeteorOrbit();
