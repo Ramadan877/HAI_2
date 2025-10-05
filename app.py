@@ -47,9 +47,6 @@ from dotenv import load_dotenv
 from database import db, Participant, Session, Interaction, Recording, UserEvent
 import uuid
 
-# Import cloud storage functionality (optional - won't break if module is missing)
-# Cloud storage removed - using manual export only
-
 load_dotenv()
 
 
@@ -223,7 +220,6 @@ db.init_app(app)
 
 with app.app_context():
     db.create_all()
-    # Thread pool executor used for background tasks (match V1)
     executor = ThreadPoolExecutor(max_workers=5)
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
@@ -350,7 +346,6 @@ def create_user_folders(participant_id, trial_type):
 
 def get_audio_filename(prefix, participant_id, trial_type, attempt_number, extension='.mp3'):
     """Generate a unique audio filename with participant ID, concept name, and attempt number."""
-    # Accept concept_name as an optional kwarg for backward compatibility
     import inspect
     frame = inspect.currentframe().f_back
     concept_name = frame.f_locals.get('concept_name', None)
@@ -364,31 +359,17 @@ def get_general_audio_filename(prefix, concept_name=None, extension='.mp3'):
 
 
 def synthesize_with_openai(text, voice='alloy', fmt='mp3'):
-    """Attempt to synthesize text using OpenAI TTS REST endpoint. Returns tuple(bytes, content_type)"""
-    api_key = OPENAI_API_KEY
+    api_key = os.environ.get('OPENAI_API_KEY')
     if not api_key:
         raise RuntimeError('OpenAI API key not configured')
-
     url = 'https://api.openai.com/v1/audio/speech'
-    headers = {
-        'Authorization': f'Bearer {api_key}',
-        'Content-Type': 'application/json'
-    }
-    payload = {
-        'model': 'gpt-4o-mini-tts',
-        'voice': voice,
-        'input': text
-    }
-    try:
-        resp = requests.post(url, headers=headers, json=payload, stream=True, timeout=60)
-        resp.raise_for_status()
-        # read all bytes
-        audio_bytes = resp.content
-        # guess content type from fmt
-        content_type = 'audio/mpeg' if fmt.lower() in ('mp3','mpeg') else 'audio/webm'
-        return audio_bytes, content_type
-    except Exception as e:
-        raise
+    headers = {'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'}
+    payload = {'model': 'gpt-4o-mini-tts', 'voice': voice, 'input': text}
+    resp = requests.post(url, headers=headers, json=payload, stream=True, timeout=60)
+    resp.raise_for_status()
+    audio_bytes = resp.content
+    content_type = 'audio/mpeg' if fmt.lower() in ('mp3','mpeg') else 'audio/webm'
+    return audio_bytes, content_type
 
 
 def ssml_wrap(text, rate='0%', pitch='0%', break_ms=250):
@@ -418,7 +399,6 @@ def ssml_wrap(text, rate='0%', pitch='0%', break_ms=250):
 
 @app.route('/synthesize', methods=['POST'])
 def synthesize():
-    """Synthesize given text to audio using OpenAI TTS if possible, otherwise fallback to gTTS."""
     try:
         data = request.get_json() or request.form
         text = data.get('text') if data else None
@@ -426,16 +406,12 @@ def synthesize():
             return jsonify({'error': 'No text provided'}), 400
         voice = data.get('voice', 'alloy')
         fmt = data.get('format', 'mp3')
-
-        # OpenAI TTS first. Wrapping text in SSML to improve prosody where supported.
         try:
             ssml_text = ssml_wrap(text, rate='5%', pitch='0%', break_ms=220)
             audio_bytes, content_type = synthesize_with_openai(ssml_text, voice=voice, fmt=fmt)
             return (audio_bytes, 200, {'Content-Type': content_type, 'Content-Disposition': 'inline; filename="tts.' + fmt + '"'})
         except Exception as openai_err:
             print('OpenAI TTS failed or rejected SSML, falling back to gTTS:', str(openai_err))
-
-        # Fallback to gTTS
         try:
             from io import BytesIO
             bio = BytesIO()
@@ -446,7 +422,6 @@ def synthesize():
         except Exception as e:
             print('gTTS fallback failed:', str(e))
             return jsonify({'error': 'TTS synthesis failed'}), 500
-
     except Exception as e:
         print('Synthesize endpoint error:', str(e))
         return jsonify({'error': str(e)}), 500
@@ -515,15 +490,6 @@ last_concept_change = {
 
 @app.route('/change_concept', methods=['POST'])
 def change_concept():
-    # Original content was accidentally overwritten and contained unrelated synthesize/event code.
-    # Preserve the original (now-commented) content here for audit before restoring proper behavior:
-    #
-    # try:
-    #     data = request.get_json() or request.form
-    #     text = data.get('text') if data else None
-    #     ... (original malformed body commented out)
-    #
-    # Restored behavior (match V1): reset attempt count for the selected concept and log the change.
     data = request.get_json()
     slide_number = data.get('slide_number', 'unknown')
     concept_name = data.get('concept_name', 'unknown')
@@ -547,36 +513,59 @@ def generate_audio_async(text, file_path):
     return executor.submit(generate_audio, text, file_path)
 
 def generate_audio(text, file_path):
-    """Generate speech (audio) from the provided text using gTTS."""
+    """Generate speech (audio) from the provided text.
+
+    Prefer OpenAI TTS (synthesize_with_openai) and save the returned bytes to disk.
+    If OpenAI TTS is unavailable or fails, fall back to the existing gTTS + pydub logic.
+    Returns True on success, False on failure.
+    """
     try:
+        # First, try OpenAI TTS if function is available
+        try:
+            audio_bytes, content_type = synthesize_with_openai(text, voice='alloy', fmt='mp3')
+            if audio_bytes:
+                # Ensure directory exists
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                with open(file_path, 'wb') as f:
+                    f.write(audio_bytes)
+                print(f"Audio file (OpenAI TTS) saved: {file_path} (content_type={content_type})")
+                return True
+        except Exception as openai_err:
+            print(f"OpenAI TTS not available or failed: {openai_err}. Falling back to gTTS.")
+
+        # Fallback: existing gTTS + pydub implementation
         if len(text) > 500:
             chunks = [text[i:i+500] for i in range(0, len(text), 500)]
             temp_files = []
-            
+
             for i, chunk in enumerate(chunks):
                 temp_file = f"{file_path}.part{i}.mp3"
                 tts = gTTS(text=chunk, lang='en')
                 tts.save(temp_file)
                 temp_files.append(temp_file)
-            
+
             combined = AudioSegment.empty()
             for temp in temp_files:
                 segment = AudioSegment.from_mp3(temp)
                 combined += segment
-            
+
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
             combined.export(file_path, format="mp3")
-            
+
             for temp in temp_files:
                 try:
                     os.remove(temp)
                 except:
                     pass
         else:
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
             tts = gTTS(text=text, lang='en')
             tts.save(file_path)
-            
+
         if os.path.exists(file_path):
-            print(f"Audio file successfully saved: {file_path}")
+            print(f"Audio file successfully saved (gTTS fallback): {file_path}")
             return True
         else:
             print(f"Failed to save audio file: {file_path}")
@@ -1197,13 +1186,11 @@ def export_complete_data():
         zip_buffer = BytesIO()
         files_found = False
         
-        # Folders to include in export
         folders_to_export = [
             app.config.get('USER_DATA_BASE_FOLDER'),
             app.config.get('CONCEPT_AUDIO_FOLDER'),
             app.config.get('INTRO_AUDIO_FOLDER'),
         ]
-        # Add screen recordings for each participant/trial if present
         user_data_base = app.config.get('USER_DATA_BASE_FOLDER', '')
         if user_data_base and os.path.exists(user_data_base):
             for participant_id in os.listdir(user_data_base):
@@ -1222,7 +1209,6 @@ def export_complete_data():
                     for root, dirs, files in os.walk(folder):
                         for file in files:
                             file_path = os.path.join(root, file)
-                            # Use correct rel_path for user audio files
                             if folder == app.config['USER_DATA_BASE_FOLDER']:
                                 rel_path = os.path.relpath(file_path, app.config['USER_DATA_BASE_FOLDER'])
                             else:
