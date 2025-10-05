@@ -9,9 +9,8 @@
     let pendingRecordingBlob = null;
     let pendingMimeType = null;
     let hasPendingRecording = false;
-    let pendingRecordingId = null; // id in IndexedDB when saved
+    let pendingRecordingId = null; 
 
-    // --- IndexedDB helpers (simple wrapper) ---
     function openDB() {
         return new Promise((resolve, reject) => {
             try {
@@ -65,7 +64,6 @@
         }));
     }
 
-    // Upload queued DB recordings (retry loop)
     async function processPendingRecordings() {
         try {
             const rows = await getAllRecordingsFromDB();
@@ -145,17 +143,14 @@
                     pendingMimeType = blob.type;
                     hasPendingRecording = true;
                     console.log('V2: pending recording assembled (no upload yet), bytes=', blob.size);
-                    // Save to IndexedDB for reliable persistence and retry on next load
                     try {
                         const meta = { filename: `session_recording_${new Date().toISOString().replace(/[:.]/g,'')}.webm`, trial_type: window.currentTrialType || 'unknown', participant_id: window.participantId || 'unknown' };
                         saveRecordingToDB(blob, meta).then(id => {
                             pendingRecordingId = id;
                             console.log('V2: saved pending recording to DB id=', id);
-                            // Attempt immediate upload now that we have the assembled blob and a DB record.
                             uploadPendingRecording().then(result => {
                                 console.log('V2: immediate upload result after save:', result);
                                 if (result && (result.success || result.beacon || (result.status && result.status === 'success'))) {
-                                    // If upload succeeded, remove DB entry
                                     if (pendingRecordingId) {
                                         deleteRecordingFromDB(pendingRecordingId).then(() => { pendingRecordingId = null; console.log('V2: deleted DB record after successful upload'); }).catch(() => {});
                                     }
@@ -198,7 +193,6 @@
                                         mediaRecorder.stream.addTrack(newTrack);
                                     }
                                 } catch (remErr) { console.warn('V2: could not replace track on mediaRecorder.stream', remErr); }
-                                // wire the onended handler again
                                 newTrack.onended = recordingStream.getVideoTracks()[0].onended;
                                 console.log('V2: re-acquired display track, continuing recording');
                                 return;
@@ -279,7 +273,6 @@
             hasPendingRecording = false;
             pendingRecordingBlob = null;
             pendingMimeType = null;
-            // If we saved this recording to IndexedDB earlier, remove its record now
             try {
                 if (pendingRecordingId) {
                     await deleteRecordingFromDB(pendingRecordingId);
@@ -346,7 +339,6 @@
             isRecording = false;
             recordingStartTime = null;
             recordedChunks = [];
-            // Attempt to process any DB-persisted pending recordings (retry uploads)
             try { processPendingRecordings().catch(()=>{}); } catch(_){}
         } catch (error) {
             console.error('V2 Error during cleanup:', error);
@@ -359,16 +351,13 @@
     window.addEventListener('beforeunload', (event) => {
         console.log('V2 beforeunload event triggered');
         try {
-            // Try to stop recorder (will assemble pending onstop asynchronously)
             try { if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop(); } catch(_){}
 
-            // If we already have a pending blob, try a synchronous sendBeacon to improve chance of server receipt.
             if (hasPendingRecording && pendingRecordingBlob && navigator && navigator.sendBeacon) {
                 try { sendBeaconForPending(); } catch (e) { console.warn('V2 beforeunload sendBeacon failed', e); }
             } else if (recordedChunks && recordedChunks.length > 0 && navigator && navigator.sendBeacon) {
                 try { sendBeaconForPending(); } catch (e) { console.warn('V2 beforeunload sendBeacon failed (assembled)', e); }
             }
-            // Allow unload to proceed; async fetches are not reliable here.
         } catch (e) {
             console.warn('V2 beforeunload handler error', e);
         }
@@ -399,7 +388,6 @@
 
     window.uploadPendingRecording = uploadPendingRecording;
 
-    // Synchronous sendBeacon fallback that sends the pending blob (or assembles from recordedChunks) as FormData.
     function sendBeaconForPending() {
         if (!navigator || !navigator.sendBeacon) { console.warn('V2: sendBeacon not available'); return false; }
         try {
@@ -409,7 +397,6 @@
             const participant = encodeURIComponent(window.participantId || 'unknown');
             const trial = encodeURIComponent(window.currentTrialType || 'unknown');
             const url = `/save_screen_recording?participant_id=${participant}&trial_type=${trial}&filename=${encodeURIComponent(filename)}`;
-            // send raw blob as beacon body (server will treat raw body as file)
             const ok = navigator.sendBeacon(url, blobToSend);
             console.log('V2: sendBeacon result', ok, 'url', url, 'bytes', blobToSend.size);
             if (ok) {
@@ -424,5 +411,4 @@
 
 })();
 
-// On load, attempt to process any pending recordings saved to IndexedDB
 try { if (typeof window !== 'undefined') { window.addEventListener('load', () => { try { processPendingRecordings().catch(()=>{}); } catch(_){} }); } } catch(_){}
