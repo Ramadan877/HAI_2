@@ -1275,6 +1275,45 @@ def export_complete_data():
         print(f"Export error: {str(e)}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+
+@app.route('/diagnose_uploads')
+def diagnose_uploads():
+    """Return a JSON summary of upload folders and environment info for debugging (V2)."""
+    try:
+        def sample_files(base, limit=50):
+            out = []
+            if not base or not os.path.exists(base):
+                return out
+            for root, dirs, files in os.walk(base):
+                for f in files:
+                    path = os.path.join(root, f)
+                    try:
+                        out.append({'path': os.path.relpath(path, base), 'size': os.path.getsize(path), 'mtime': os.path.getmtime(path)})
+                    except Exception:
+                        out.append({'path': os.path.relpath(path, base), 'size': None, 'mtime': None})
+                    if len(out) >= limit:
+                        return out
+            return out
+
+        upload_folder = app.config.get('UPLOAD_FOLDER')
+        user_data_base = app.config.get('USER_DATA_BASE_FOLDER')
+        concept_audio_folder = app.config.get('CONCEPT_AUDIO_FOLDER')
+
+        data = {
+            'upload_folder': upload_folder,
+            'upload_exists': os.path.exists(upload_folder) if upload_folder else False,
+            'user_data_base': user_data_base,
+            'user_data_exists': os.path.exists(user_data_base) if user_data_base else False,
+            'concept_audio_folder': concept_audio_folder,
+            'concept_audio_exists': os.path.exists(concept_audio_folder) if concept_audio_folder else False,
+            'sample_upload_files': sample_files(upload_folder, limit=200),
+            'sample_user_data_files': sample_files(user_data_base, limit=200),
+            'openai_api_key_present': bool(os.environ.get('OPENAI_API_KEY')),
+        }
+        return jsonify({'status': 'ok', 'diagnostic': data})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 @app.route('/export_latest_session')
 def export_latest_session():
     """Export only the most recent session data for each participant."""
