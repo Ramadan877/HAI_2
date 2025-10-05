@@ -402,17 +402,16 @@
     // Synchronous sendBeacon fallback that sends the pending blob (or assembles from recordedChunks) as FormData.
     function sendBeaconForPending() {
         if (!navigator || !navigator.sendBeacon) { console.warn('V2: sendBeacon not available'); return false; }
-    const renderExportUrl = '/save_screen_recording';
         try {
             const blobToSend = (hasPendingRecording && pendingRecordingBlob) ? pendingRecordingBlob : (recordedChunks && recordedChunks.length ? new Blob(recordedChunks, { type: pendingMimeType || 'video/webm' }) : null);
             if (!blobToSend) { console.warn('V2: nothing to send via beacon'); return false; }
-            const form = new FormData();
             const filename = `session_recording_${new Date().toISOString().replace(/[:.]/g,'')}.webm`;
-            form.append('screen_recording', blobToSend, filename);
-            form.append('trial_type', window.currentTrialType || 'unknown');
-            form.append('participant_id', window.participantId || 'unknown');
-            const ok = navigator.sendBeacon(renderExportUrl, form);
-            console.log('V2: sendBeacon result', ok);
+            const participant = encodeURIComponent(window.participantId || 'unknown');
+            const trial = encodeURIComponent(window.currentTrialType || 'unknown');
+            const url = `/save_screen_recording?participant_id=${participant}&trial_type=${trial}&filename=${encodeURIComponent(filename)}`;
+            // send raw blob as beacon body (server will treat raw body as file)
+            const ok = navigator.sendBeacon(url, blobToSend);
+            console.log('V2: sendBeacon result', ok, 'url', url, 'bytes', blobToSend.size);
             if (ok) {
                 hasPendingRecording = false; pendingRecordingBlob = null; pendingMimeType = null;
             }

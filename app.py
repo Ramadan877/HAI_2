@@ -582,13 +582,32 @@ def save_screen_recording():
         app.logger.info(f"V2 Files received: {list(request.files.keys())}")
         app.logger.info(f"V2 Form data: {list(request.form.keys())}")
         
-        if 'screen_recording' not in request.files:
+        # Support both multipart/form-data uploads and raw POST body (used by navigator.sendBeacon)
+        screen_recording = None
+        trial_type = None
+        participant_id = None
+
+        if 'screen_recording' in request.files:
+            screen_recording = request.files['screen_recording']
+            trial_type = request.form.get('trial_type')
+            participant_id = request.form.get('participant_id')
+        else:
+            # Try to handle raw body (beacon). Expect metadata in query params: participant_id, trial_type, filename
+            raw = request.get_data()
+            if raw and len(raw) > 0:
+                # We'll wrap raw bytes in a BytesIO with a filename from query or generated
+                from io import BytesIO
+                filename_q = request.args.get('filename') or f"session_recording_{datetime.now().strftime('%Y%m%d_%H%M%S')}.webm"
+                participant_id = request.args.get('participant_id')
+                trial_type = request.args.get('trial_type')
+                # Create a werkzeug FileStorage-like object via BytesIO and save manually below
+                screen_recording = BytesIO(raw)
+                screen_recording.filename = filename_q
+                # Note: screen_recording here is a BytesIO with .filename attribute for downstream handling
+
+        if not screen_recording:
             app.logger.error('V2 No screen recording file provided')
             return jsonify({'error': 'No screen recording file provided'}), 400
-            
-        screen_recording = request.files['screen_recording']
-        trial_type = request.form.get('trial_type')
-        participant_id = request.form.get('participant_id')
         
         app.logger.info(f'V2 Received screen recording request - Participant: {participant_id}, Trial: {trial_type}')
         
@@ -602,13 +621,14 @@ def save_screen_recording():
         screen_recordings_dir = os.path.join(task_folder, 'Screen Recordings')
         app.logger.info(f'V2 Screen recordings directory: {screen_recordings_dir}')
         
-        original_filename = screen_recording.filename or 'screen_recording.webm'
+        # Support BytesIO (beacon) or FileStorage (multipart)
+        original_filename = getattr(screen_recording, 'filename', None) or 'screen_recording.webm'
         if original_filename.startswith('screen_recording_') and original_filename.endswith('.webm'):
-            filename = original_filename  
+            filename = original_filename
         else:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             filename = f'screen_recording_{timestamp}.webm'
-            
+
         filepath = os.path.join(screen_recordings_dir, filename)
         if os.path.exists(filepath):
             base, ext = os.path.splitext(filename)
@@ -617,11 +637,19 @@ def save_screen_recording():
                 counter += 1
             filename = f"{base}_{counter}{ext}"
             filepath = os.path.join(screen_recordings_dir, filename)
-        
+
         app.logger.info(f'V2 Saving screen recording to: {filepath}')
-        
+
         try:
-            screen_recording.save(filepath)
+            # If we received a BytesIO (sendBeacon), write bytes directly; otherwise use .save()
+            if hasattr(screen_recording, 'read') and not hasattr(screen_recording, 'save'):
+                # BytesIO-like
+                with open(filepath, 'wb') as out_f:
+                    screen_recording.seek(0)
+                    out_f.write(screen_recording.read())
+            else:
+                # werkzeug FileStorage
+                screen_recording.save(filepath)
             
             if os.path.exists(filepath):
                 file_size = os.path.getsize(filepath)
