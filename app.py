@@ -390,13 +390,11 @@ def synthesize_with_openai(text, voice='alloy', fmt='mp3'):
 
 
 def ssml_wrap(text, rate='0%', pitch='0%', break_ms=250):
-    """Wrap text with a minimal SSML template to improve prosody.
-    This function inserts <break> tags after sentence-ending punctuation and wraps text
-    in a <speak> element with an overall prosody adjustment. For safety, it escapes
-    XML-sensitive characters and limits the amount of SSML inserted.
+    """Wrap text in a small SSML template to improve TTS prosody.
+    This escapes XML special chars and inserts small breaks after punctuation.
+    If SSML generation fails, return original text.
     """
     try:
-        # Basic escaping for XML special characters
         def esc(t):
             return (t.replace('&', '&amp;')
                      .replace('<', '&lt;')
@@ -405,18 +403,14 @@ def ssml_wrap(text, rate='0%', pitch='0%', break_ms=250):
                      .replace("'", '&apos;'))
 
         safe_text = esc(text)
-
-        # Insert short breaks after punctuation to encourage natural phrasing
         import re
-        # Add break after ., ?, ! and after comma with smaller break
         safe_text = re.sub(r'([\.\?\!])\s+', r"\1 <break time=\"%dms\"/> " % break_ms, safe_text)
         safe_text = re.sub(r',\s+', r', <break time=\"%dms\"/> ' % int(break_ms/2), safe_text)
 
-        # Wrap in prosody tag to slightly slow down and warm the voice
         ssml = f"<speak><prosody rate='-{abs(int(rate.strip('%') if isinstance(rate,str) and rate.endswith('%') else 0))}%' pitch='{pitch}'>" + safe_text + "</prosody></speak>"
         return ssml
     except Exception as e:
-        print('SSML wrapping failed, falling back to plain text:', str(e))
+        print('SSML wrap failed:', str(e))
         return text
 
 
