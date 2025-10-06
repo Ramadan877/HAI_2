@@ -656,12 +656,38 @@ def save_screen_recording():
                 if file_size > 0:
                     size_mb = round(file_size / (1024 * 1024), 2)
                     app.logger.info(f'V2 Screen recording saved successfully: {filepath} ({size_mb}MB)')
-                    
+                    # Attempt to save metadata to database if configured
+                    recording_id = None
+                    try:
+                        if os.environ.get('DATABASE_URL'):
+                            sess_id = session.get('session_id')
+                            if not sess_id:
+                                try:
+                                    sess_id = create_session_record(participant_id, trial_type, 'V2')
+                                    if sess_id:
+                                        session['session_id'] = sess_id
+                                except Exception as e:
+                                    app.logger.warning(f'V2: could not create DB session: {e}')
+
+                            if sess_id:
+                                try:
+                                    rel_path = os.path.relpath(filepath, app.config.get('UPLOAD_FOLDER', 'uploads'))
+                                except Exception:
+                                    rel_path = filepath
+                                try:
+                                    recording_id = save_recording_to_db(sess_id, 'screen_recording', rel_path, original_filename, file_size)
+                                    app.logger.info(f'V2: recording metadata saved to DB id={recording_id}')
+                                except Exception as e:
+                                    app.logger.error(f'V2: failed to save recording metadata: {e}')
+                    except Exception as ex:
+                        app.logger.warning(f'V2: DB save skipped or failed: {ex}')
+
                     return jsonify({
                         'success': True,
                         'message': 'V2 Screen recording uploaded successfully',
                         'filename': filename,
                         'size_mb': size_mb,
+                        'recording_id': recording_id,
                         'status': 'success'
                     }), 200
                 else:
