@@ -520,11 +520,9 @@ def generate_audio(text, file_path):
     Returns True on success, False on failure.
     """
     try:
-        # First, try OpenAI TTS if function is available
         try:
             audio_bytes, content_type = synthesize_with_openai(text, voice='alloy', fmt='mp3')
             if audio_bytes:
-                # Ensure directory exists
                 os.makedirs(os.path.dirname(file_path), exist_ok=True)
                 with open(file_path, 'wb') as f:
                     f.write(audio_bytes)
@@ -533,7 +531,6 @@ def generate_audio(text, file_path):
         except Exception as openai_err:
             print(f"OpenAI TTS not available or failed: {openai_err}. Falling back to gTTS.")
 
-        # Fallback: existing gTTS + pydub implementation
         if len(text) > 500:
             chunks = [text[i:i+500] for i in range(0, len(text), 500)]
             temp_files = []
@@ -549,7 +546,6 @@ def generate_audio(text, file_path):
                 segment = AudioSegment.from_mp3(temp)
                 combined += segment
 
-            # Ensure directory exists
             os.makedirs(os.path.dirname(file_path), exist_ok=True)
             combined.export(file_path, format="mp3")
 
@@ -559,7 +555,6 @@ def generate_audio(text, file_path):
                 except:
                     pass
         else:
-            # Ensure directory exists
             os.makedirs(os.path.dirname(file_path), exist_ok=True)
             tts = gTTS(text=text, lang='en')
             tts.save(file_path)
@@ -574,136 +569,6 @@ def generate_audio(text, file_path):
         print(f"Error generating audio: {str(e)}")
         return False
 
-
-@app.route('/save_screen_recording', methods=['POST'])
-def save_screen_recording():
-    try:
-        app.logger.info('V2 Received save_screen_recording request')
-        app.logger.info(f"V2 Files received: {list(request.files.keys())}")
-        app.logger.info(f"V2 Form data: {list(request.form.keys())}")
-        
-        # Support both multipart/form-data uploads and raw POST body (used by navigator.sendBeacon)
-        screen_recording = None
-        trial_type = None
-        participant_id = None
-
-        if 'screen_recording' in request.files:
-            screen_recording = request.files['screen_recording']
-            trial_type = request.form.get('trial_type')
-            participant_id = request.form.get('participant_id')
-        else:
-            # Try to handle raw body (beacon). Expect metadata in query params: participant_id, trial_type, filename
-            raw = request.get_data()
-            if raw and len(raw) > 0:
-                # We'll wrap raw bytes in a BytesIO with a filename from query or generated
-                from io import BytesIO
-                filename_q = request.args.get('filename') or f"session_recording_{datetime.now().strftime('%Y%m%d_%H%M%S')}.webm"
-                participant_id = request.args.get('participant_id')
-                trial_type = request.args.get('trial_type')
-                # Create a werkzeug FileStorage-like object via BytesIO and save manually below
-                screen_recording = BytesIO(raw)
-                screen_recording.filename = filename_q
-                # Note: screen_recording here is a BytesIO with .filename attribute for downstream handling
-
-        if not screen_recording:
-            app.logger.error('V2 No screen recording file provided')
-            return jsonify({'error': 'No screen recording file provided'}), 400
-        
-        app.logger.info(f'V2 Received screen recording request - Participant: {participant_id}, Trial: {trial_type}')
-        
-        if not all([screen_recording, trial_type, participant_id]):
-            app.logger.error('V2 Missing required parameters')
-            return jsonify({'error': 'Missing required parameters'}), 400
-            
-        task_folder = create_user_folders(participant_id, trial_type)
-        app.logger.info(f'V2 Task folder: {task_folder}')
-        
-        screen_recordings_dir = os.path.join(task_folder, 'Screen Recordings')
-        app.logger.info(f'V2 Screen recordings directory: {screen_recordings_dir}')
-        
-        # Support BytesIO (beacon) or FileStorage (multipart)
-        original_filename = getattr(screen_recording, 'filename', None) or 'screen_recording.webm'
-        if original_filename.startswith('screen_recording_') and original_filename.endswith('.webm'):
-            filename = original_filename
-        else:
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            filename = f'screen_recording_{timestamp}.webm'
-
-        filepath = os.path.join(screen_recordings_dir, filename)
-        if os.path.exists(filepath):
-            base, ext = os.path.splitext(filename)
-            counter = 1
-            while os.path.exists(os.path.join(screen_recordings_dir, f"{base}_{counter}{ext}")):
-                counter += 1
-            filename = f"{base}_{counter}{ext}"
-            filepath = os.path.join(screen_recordings_dir, filename)
-
-        app.logger.info(f'V2 Saving screen recording to: {filepath}')
-
-        try:
-            # If we received a BytesIO (sendBeacon), write bytes directly; otherwise use .save()
-            if hasattr(screen_recording, 'read') and not hasattr(screen_recording, 'save'):
-                # BytesIO-like
-                with open(filepath, 'wb') as out_f:
-                    screen_recording.seek(0)
-                    out_f.write(screen_recording.read())
-            else:
-                # werkzeug FileStorage
-                screen_recording.save(filepath)
-            
-            if os.path.exists(filepath):
-                file_size = os.path.getsize(filepath)
-                if file_size > 0:
-                    size_mb = round(file_size / (1024 * 1024), 2)
-                    app.logger.info(f'V2 Screen recording saved successfully: {filepath} ({size_mb}MB)')
-                    # Attempt to save metadata to database if configured
-                    recording_id = None
-                    try:
-                        if os.environ.get('DATABASE_URL'):
-                            sess_id = session.get('session_id')
-                            if not sess_id:
-                                try:
-                                    sess_id = create_session_record(participant_id, trial_type, 'V2')
-                                    if sess_id:
-                                        session['session_id'] = sess_id
-                                except Exception as e:
-                                    app.logger.warning(f'V2: could not create DB session: {e}')
-
-                            if sess_id:
-                                try:
-                                    rel_path = os.path.relpath(filepath, app.config.get('UPLOAD_FOLDER', 'uploads'))
-                                except Exception:
-                                    rel_path = filepath
-                                try:
-                                    recording_id = save_recording_to_db(sess_id, 'screen_recording', rel_path, original_filename, file_size)
-                                    app.logger.info(f'V2: recording metadata saved to DB id={recording_id}')
-                                except Exception as e:
-                                    app.logger.error(f'V2: failed to save recording metadata: {e}')
-                    except Exception as ex:
-                        app.logger.warning(f'V2: DB save skipped or failed: {ex}')
-
-                    return jsonify({
-                        'success': True,
-                        'message': 'V2 Screen recording uploaded successfully',
-                        'filename': filename,
-                        'size_mb': size_mb,
-                        'recording_id': recording_id,
-                        'status': 'success'
-                    }), 200
-                else:
-                    app.logger.error('V2 Screen recording file is empty')
-                    return jsonify({'error': 'Screen recording file is empty'}), 500
-            else:
-                app.logger.error('V2 Screen recording file was not created')
-                return jsonify({'error': 'Failed to save screen recording file'}), 500
-                
-        except Exception as save_error:
-            app.logger.error(f'V2 Error saving file: {str(save_error)}')
-            return jsonify({'error': f'Error saving file: {str(save_error)}'}), 500
-        
-    except Exception as e:
-        app.logger.error(f"V2 Error saving screen recording: {str(e)}")
-        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/list_recent_recordings')
@@ -1280,15 +1145,6 @@ def export_complete_data():
             app.config.get('INTRO_AUDIO_FOLDER'),
         ]
         user_data_base = app.config.get('USER_DATA_BASE_FOLDER', '')
-        if user_data_base and os.path.exists(user_data_base):
-            for participant_id in os.listdir(user_data_base):
-                participant_path = os.path.join(user_data_base, participant_id)
-                if os.path.isdir(participant_path):
-                    for trial_folder in os.listdir(participant_path):
-                        trial_path = os.path.join(participant_path, trial_folder)
-                        screen_recordings_folder = os.path.join(trial_path, 'Screen Recordings')
-                        if os.path.exists(screen_recordings_folder):
-                            folders_to_export.append(screen_recordings_folder)
         
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
             for folder in folders_to_export:
