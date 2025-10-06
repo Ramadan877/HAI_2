@@ -38,6 +38,7 @@ import json
 import uuid
 from datetime import datetime
 import logging
+import re
 import gc
 import threading
 from functools import lru_cache
@@ -921,6 +922,22 @@ def generate_response(user_message, concept_name, golden_answer, attempt_count):
     If the user is not talking about the current concept, guide them back to the task of self-explaining the current concept.
     """
 
+    enforcement_system = (
+        "You MUST respond only in English. If the user's input is in any other language, do NOT reply in that language; "
+        "instead, in English, politely ask the user to repeat their explanation in English because English is the language of this interaction. "
+        "Do not use emojis, emoticons, or any non-text decorations. Keep the reply short and instructive when asking for English."
+    )
+
+    def detect_non_english(text):
+        """Rudimentary non-English detector using Unicode script ranges for common non-Latin scripts."""
+        if not text:
+            return False
+        non_latin_regex = re.compile(r"[\u0590-\u05FF\u0600-\u06FF\u0400-\u04FF\u0900-\u097F\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF]")
+        return bool(non_latin_regex.search(text))
+
+    if detect_non_english(user_message):
+        return "Please repeat your explanation in English so I can provide feedback. This interaction uses English only."
+
     user_prompt = f"""
     User Explanation: {user_message}
     """
@@ -935,12 +952,15 @@ def generate_response(user_message, concept_name, golden_answer, attempt_count):
         user_prompt += "\nLet the user know they have completed three self-explanation attempts. Instruct them to stop here and tell them to continue with the next concept."
 
     try:
+        messages = [
+            {"role": "system", "content": enforcement_system},
+            {"role": "system", "content": base_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+
         response = openai.ChatCompletion.create(
             model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": base_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
+            messages=messages,
             max_tokens=200,
             temperature=0.7,
         )
