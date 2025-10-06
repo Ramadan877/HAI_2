@@ -572,6 +572,7 @@ document.addEventListener("DOMContentLoaded", function () {
                        });
                    } catch (err) {
                        console.error('Error invoking synthesize:', err);
+                       // Ensure UI unlock if synthesis process failed
                        setAudioLock(false);
                        stopMeteorOrbit();
                    }
