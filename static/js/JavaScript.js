@@ -539,13 +539,6 @@ document.addEventListener("DOMContentLoaded", function () {
                if (data.ai_audio_url) {
                    stopMeteorOrbit();
 
-                   // Old behavior: set aiAudio.src to the server-side audio file and play.
-                   // aiAudio.src = data.ai_audio_url;
-                   // aiAudio.play().then(() => { activateSiriOrb(); siriOrb.style.boxShadow = "0 0 20px 5px rgba(0, 128, 255, 0.7)"; }).catch(e => console.error('Error playing AI response:', e));
-                   // aiAudio.onended = function() { siriOrb.style.boxShadow = 'none'; };
-
-                   // New behavior: synthesize the full AI response text server-side (via /synthesize), fetch the audio bytes,
-                   // decode with AudioContext and play as a single continuous buffer to avoid mid-sentence pauses.
                    try {
                        const text = data.response || '';
                        fetch('/synthesize', {
@@ -562,18 +555,24 @@ document.addEventListener("DOMContentLoaded", function () {
                            const src = audioCtx.createBufferSource();
                            src.buffer = audioBuffer;
                            src.connect(audioCtx.destination);
-                           src.onended = () => { siriOrb.style.boxShadow = 'none'; };
+                           setAudioLock(true);
+                           src.onended = () => {
+                               siriOrb.style.boxShadow = 'none';
+                               setAudioLock(false);
+                           };
                            activateSiriOrb();
                            siriOrb.style.boxShadow = "0 0 20px 5px rgba(0, 128, 255, 0.7)";
                            src.start(0);
                        }).catch(err => {
                            console.error('TTS/playback error, falling back to server file:', err);
-                           // fallback to the old server audio file playback
                            aiAudio.src = data.ai_audio_url;
-                           aiAudio.play().catch(e => console.error('Fallback play failed', e));
+                           aiAudio.onended = () => { siriOrb.style.boxShadow = 'none'; setAudioLock(false); };
+                           aiAudio.onerror = (e) => { console.error('Fallback play error', e); setAudioLock(false); };
+                           aiAudio.play().catch(e => { console.error('Fallback play failed', e); setAudioLock(false); });
                        });
                    } catch (err) {
                        console.error('Error invoking synthesize:', err);
+                       setAudioLock(false);
                        stopMeteorOrbit();
                    }
                } else {
