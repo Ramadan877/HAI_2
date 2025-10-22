@@ -1,5 +1,5 @@
 #Version 2
-from flask import Flask, request, render_template, jsonify, session, send_from_directory
+from flask import Flask, request, render_template, jsonify, session, send_from_directory, Response, stream_with_context
 from werkzeug.utils import secure_filename
 from flask_cors import CORS 
 import openai
@@ -206,6 +206,12 @@ openai.api_key = OPENAI_API_KEY
 
 app = Flask(__name__)
 CORS(app)  
+try:
+    from flask_compress import Compress
+    Compress(app)
+except Exception:
+    # flask_compress is optional; compression will be disabled if not installed
+    pass
 
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
@@ -958,6 +964,7 @@ def generate_response(user_message, concept_name, golden_answer, attempt_count):
             {"role": "user", "content": user_prompt}
         ]
 
+        # Synchronous, non-streaming call (kept for backward compatibility)
         response = openai.ChatCompletion.create(
             model="gpt-4o-mini",
             messages=messages,
@@ -971,6 +978,103 @@ def generate_response(user_message, concept_name, golden_answer, attempt_count):
         return ai_response
     except Exception as e:
         return f"Error generating AI response: {str(e)}"
+
+
+@app.route('/stream_submit_message', methods=['POST'])
+def stream_submit_message():
+    """Streaming variant of /submit_message — returns partial text as it's generated."""
+    try:
+        # process form identical to /submit_message up to generation
+        participant_id = session.get('participant_id')
+        trial_type = session.get('trial_type')
+        if not participant_id or not trial_type:
+            return jsonify({'status': 'error', 'message': 'Participant ID or trial type not found in session'}), 400
+
+        concept_name = request.form.get('concept_name', '').strip()
+        concepts = load_concepts()
+
+        concept_found = False
+        for concept in concepts:
+            if concept.lower() == concept_name.lower():
+                concept_name = concept
+                concept_found = True
+                break
+
+        if not concept_found:
+            return jsonify({'status': 'error', 'message': 'Concept not found'}), 400
+
+        golden_answer = concepts[concept_name]['golden_answer']
+
+        # if audio is included, transcribe it
+        user_transcript = ''
+        if 'audio' in request.files:
+            audio_file = request.files['audio']
+            if audio_file:
+                folders = get_participant_folder(participant_id, trial_type)
+                audio_filename = get_audio_filename('user', participant_id, 1)
+                audio_path = os.path.join(folders['participant_folder'], audio_filename)
+                audio_file.save(audio_path)
+                try:
+                    with open(audio_path, 'rb') as f:
+                        user_transcript = openai.Audio.transcribe(model='whisper-1', file=f)['text']
+                except Exception:
+                    user_transcript = speech_to_text(audio_path)
+
+        # Build messages
+        base_prompt = f"""
+        Context: {concept_name}
+        Golden Answer: {golden_answer}
+        User Explanation: {user_transcript}
+        """
+
+        messages = [
+            {"role": "system", "content": base_prompt},
+            {"role": "user", "content": user_transcript}
+        ]
+
+        def generate():
+            try:
+                # Use streaming API if available
+                stream_resp = openai.ChatCompletion.create(
+                    model='gpt-4o-mini',
+                    messages=messages,
+                    max_tokens=200,
+                    temperature=0.7,
+                    stream=True
+                )
+
+                accumulator = ''
+                for event in stream_resp:
+                    try:
+                        # Extract token delta depending on response shape
+                        token = ''
+                        if isinstance(event, dict) and 'choices' in event:
+                            ch = event['choices'][0]
+                            if 'delta' in ch:
+                                token = ch['delta'].get('content', '')
+                            elif 'text' in ch:
+                                token = ch.get('text', '')
+                        elif hasattr(event, 'choices'):
+                            # fall back for client objects
+                            try:
+                                token = event.choices[0].delta.get('content', '')
+                            except Exception:
+                                token = ''
+
+                        if token:
+                            accumulator += token
+                            yield token
+                    except Exception:
+                        continue
+
+                # final newline to signal completion
+                yield '\n'
+            except Exception as e:
+                yield f"[error] {str(e)}"
+
+        return Response(stream_with_context(generate()), content_type='text/plain; charset=utf-8')
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/uploads/concept_audio/<filename>')
 def serve_concept_audio(filename):
