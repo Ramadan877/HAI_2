@@ -812,6 +812,9 @@ def submit_message():
 
     current_attempt_count = session['concept_attempts'][concept_name]
     print(f"Current attempt count for {concept_name}: {current_attempt_count}")
+    
+    # Get conversation history for this concept
+    conversation_history = session.get('conversation_history', {}).get(concept_name, [])
 
     if audio_file:
         task_folder = create_user_folders(participant_id, trial_type)
@@ -849,7 +852,8 @@ def submit_message():
         user_message,
         selected_concept["name"],
         selected_concept["golden_answer"],
-        current_attempt_count + 1
+        current_attempt_count + 1,
+        conversation_history
     )
 
     if not ai_response:
@@ -857,6 +861,22 @@ def submit_message():
         return jsonify({'error': 'AI response generation failed.'})
 
     print(f"AI Response: {ai_response}") 
+
+    # Update conversation history
+    if 'conversation_history' not in session:
+        session['conversation_history'] = {}
+    if concept_name not in session['conversation_history']:
+        session['conversation_history'][concept_name] = []
+    
+    # Add current interaction to history
+    session['conversation_history'][concept_name].append(f"User: {user_message}")
+    session['conversation_history'][concept_name].append(f"AI: {ai_response}")
+    
+    # Keep only last 10 interactions (5 exchanges) to avoid prompt bloat
+    if len(session['conversation_history'][concept_name]) > 10:
+        session['conversation_history'][concept_name] = session['conversation_history'][concept_name][-10:]
+    
+    session.modified = True
 
     log_interaction("AI", concept_name, ai_response)
     
@@ -903,24 +923,34 @@ def submit_message():
     return jsonify({
         'response': ai_response,
         'ai_audio_url': ai_audio_url,
-        'user_transcript': user_message 
+        'user_transcript': user_message,
+        'attempt_count': current_attempt_count + 1,
+        'should_move_to_next': current_attempt_count >= 3
     })
 
-def generate_response(user_message, concept_name, golden_answer, attempt_count):
-    """Generate a response dynamically using OpenAI GPT."""
+def generate_response(user_message, concept_name, golden_answer, attempt_count, conversation_history=None):
+    """Generate a response dynamically using OpenAI GPT with conversation history."""
 
     if not golden_answer or not concept_name:
         return "As your tutor, I'm not able to provide you with feedback without having context about your explanation. Please ensure the context is set."
     
+    # Build conversation history context
+    history_context = ""
+    if conversation_history and len(conversation_history) > 0:
+        history_context = "\n\nPrevious conversation:\n"
+        for entry in conversation_history[-5:]:  # Last 5 interactions
+            history_context += f"- {entry}\n"
+    
     base_prompt = f"""
     Context: {concept_name}
     Golden Answer: {golden_answer}
-    User Explanation: {user_message}
+    User Explanation: {user_message}{history_context}
     
     You are a supportive tutor. Keep responses very brief (1-2 sentences max).
 
     Guidelines:
     - Be encouraging but concise.
+    - Reference previous conversation when relevant to show you remember.
     - Never reveal the golden answer until after the third attempt.
     - When correct: confirm and tell them to move to the next concept.
     - When incorrect: give one specific hint only.

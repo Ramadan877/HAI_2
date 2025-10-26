@@ -69,7 +69,7 @@ document.addEventListener("DOMContentLoaded", function () {
     function setAudioLock(isLocked) {
         isAudioPlaying = isLocked;
         
-        if (isLocked) {
+        if (isLocked || isWaitingForAIResponse) {
             avatar.style.opacity = "0.7";
             avatar.style.cursor = "wait";
         } else {
@@ -558,6 +558,7 @@ document.addEventListener("DOMContentLoaded", function () {
                            setAudioLock(true);
                            src.onended = () => {
                                siriOrb.style.boxShadow = 'none';
+                               isWaitingForAIResponse = false;
                                setAudioLock(false);
                            };
                            activateSiriOrb();
@@ -566,9 +567,22 @@ document.addEventListener("DOMContentLoaded", function () {
                        }).catch(err => {
                            console.error('TTS/playback error, falling back to server file:', err);
                            aiAudio.src = data.ai_audio_url;
-                           aiAudio.onended = () => { siriOrb.style.boxShadow = 'none'; setAudioLock(false); };
-                           aiAudio.onerror = (e) => { console.error('Fallback play error', e); setAudioLock(false); };
-                           aiAudio.play().catch(e => { console.error('Fallback play failed', e); setAudioLock(false); });
+                           aiAudio.onended = () => { 
+                               siriOrb.style.boxShadow = 'none'; 
+                               isWaitingForAIResponse = false; 
+                               setAudioLock(false); 
+                           };
+                           aiAudio.onerror = (e) => { 
+                               console.error('Fallback play error', e); 
+                               isWaitingForAIResponse = false; 
+                               setAudioLock(false); 
+                           };
+                           setAudioLock(true);
+                           aiAudio.play().catch(e => { 
+                               console.error('Fallback play failed', e); 
+                               isWaitingForAIResponse = false; 
+                               setAudioLock(false); 
+                           });
                        });
                    } catch (err) {
                        console.error('Error invoking synthesize:', err);
@@ -579,10 +593,14 @@ document.addEventListener("DOMContentLoaded", function () {
                } else {
                    console.error("AI audio URL missing from response");
                    stopMeteorOrbit();
+                   isWaitingForAIResponse = false;
+                   setAudioLock(false);
                }
             } catch (error) {
                 console.error("Error processing recording:", error);
                 stopMeteorOrbit();
+                isWaitingForAIResponse = false;
+                setAudioLock(false);
             }
             
             mediaRecorder.stream.getTracks().forEach(track => track.stop());

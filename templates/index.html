@@ -819,25 +819,42 @@
                                     const src = audioCtx.createBufferSource();
                                     src.buffer = audioBuffer;
                                     src.connect(audioCtx.destination);
-                                    src.onended = () => { siriOrb.style.boxShadow = 'none'; isWaitingForAIResponse = false; };
+                                    src.onended = () => { 
+                                        siriOrb.style.boxShadow = 'none'; 
+                                        isWaitingForAIResponse = false; 
+                                        setAudioLock(false);
+                                    };
                                     activateSiriOrb();
                                     siriOrb.style.boxShadow = "0 0 20px 5px rgba(0, 128, 255, 0.7)";
+                                    setAudioLock(true);
                                     src.start(0);
                                 } catch (err) {
                                     console.error('TTS/playback error, falling back to server file:', err);
                                     aiAudio.src = data.ai_audio_url;
-                                    aiAudio.play().catch(e => console.error('Fallback play failed', e));
+                                    aiAudio.onended = () => { 
+                                        siriOrb.style.boxShadow = 'none'; 
+                                        isWaitingForAIResponse = false; 
+                                        setAudioLock(false);
+                                    };
+                                    setAudioLock(true);
+                                    aiAudio.play().catch(e => {
+                                        console.error('Fallback play failed', e);
+                                        isWaitingForAIResponse = false;
+                                        setAudioLock(false);
+                                    });
                                 }
                             })();
                         } else {
                             console.error("AI audio URL missing from response");
                             stopMeteorOrbit();
                             isWaitingForAIResponse = false;
+                            setAudioLock(false);
                         }
                     } catch (error) {
                         console.error("Error processing recording:", error);
                         stopMeteorOrbit();
                         isWaitingForAIResponse = false;
+                        setAudioLock(false);
                     }
                     
                     mediaRecorder.stream.getTracks().forEach(track => track.stop());
