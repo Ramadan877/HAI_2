@@ -837,7 +837,7 @@ def submit_message():
     # Get conversation history for this concept
     conversation_history = session.get('conversation_history', {}).get(concept_name, [])
 
-    if audio_file:
+    if audio_file and getattr(audio_file, 'filename', None):
         task_folder = create_user_folders(participant_id, trial_type)
         user_audio_filename = get_audio_filename('user', participant_id, trial_type, current_attempt_count + 1, '.wav')
         audio_path = os.path.join(task_folder, user_audio_filename)
@@ -869,11 +869,12 @@ def submit_message():
     session['concept_attempts'][concept_name] = current_attempt_count + 1
     print(f"Updated attempt count for {concept_name}: {session['concept_attempts'][concept_name]}")
 
+    # Pass zero-based attempt count to the generator (0 == first attempt)
     ai_response = generate_response(
         user_message,
         selected_concept["name"],
         selected_concept["golden_answer"],
-        current_attempt_count + 1,
+        current_attempt_count,
         conversation_history
     )
 
@@ -881,19 +882,31 @@ def submit_message():
         print("Error: AI response generation failed!")  
         return jsonify({'error': 'AI response generation failed.'})
 
-    print(f"AI Response: {ai_response}") 
+    print(f"AI Response: {ai_response}")
 
-    # Update conversation history
+    ai_lower = (ai_response or "").lower()
+    move_phrases = [
+        "please move to the next concept",
+        "move to the next concept",
+        "move on to the next concept",
+        "please move on to the next concept",
+        "correct answer:"
+    ]
+    should_move = any(p in ai_lower for p in move_phrases)
+    if should_move:
+        try:
+            session['concept_attempts'][concept_name] = 3
+        except Exception:
+            pass
+
     if 'conversation_history' not in session:
         session['conversation_history'] = {}
     if concept_name not in session['conversation_history']:
         session['conversation_history'][concept_name] = []
     
-    # Add current interaction to history
     session['conversation_history'][concept_name].append(f"User: {user_message}")
     session['conversation_history'][concept_name].append(f"AI: {ai_response}")
     
-    # Keep only last 10 interactions (5 exchanges) to avoid prompt bloat
     if len(session['conversation_history'][concept_name]) > 10:
         session['conversation_history'][concept_name] = session['conversation_history'][concept_name][-10:]
     
@@ -911,10 +924,7 @@ def submit_message():
     ai_response_filename = get_audio_filename('AI', participant_id, trial_type, current_attempt_count + 1)
     audio_response_path = os.path.join(task_folder, ai_response_filename)
 
-    # Generate AI audio asynchronously so we can return the textual response
-    # immediately to the client and avoid blocking while TTS runs.
     try:
-        # executor is created during app startup (ThreadPoolExecutor)
         executor.submit(generate_audio, ai_response, audio_response_path)
     except Exception as e:
         print(f"Failed to start async audio generation: {e}")
@@ -949,8 +959,8 @@ def submit_message():
         'response': ai_response,
         'ai_audio_url': ai_audio_url,
         'user_transcript': user_message,
-        'attempt_count': current_attempt_count + 1,
-        'should_move_to_next': current_attempt_count >= 3
+        'attempt_count': session.get('concept_attempts', {}).get(concept_name, current_attempt_count + 1),
+        'should_move_to_next': bool(should_move)
     })
 
 def generate_response(user_message, concept_name, golden_answer, attempt_count, conversation_history=None):
@@ -959,12 +969,13 @@ def generate_response(user_message, concept_name, golden_answer, attempt_count, 
     if not golden_answer or not concept_name:
         return "As your tutor, I'm not able to provide you with feedback without having context about your explanation. Please ensure the context is set."
     
+    # Build conversation history context exactly like V1
     history_context = ""
     if conversation_history and len(conversation_history) > 0:
         history_context = "\n\nPrevious conversation:\n"
         for entry in conversation_history[-5:]:  # Last 5 interactions
             history_context += f"- {entry}\n"
-    
+
     base_prompt = f"""
     Context: {concept_name}
     Golden Answer: {golden_answer}
@@ -981,14 +992,34 @@ def generate_response(user_message, concept_name, golden_answer, attempt_count, 
     - No emojis or lists.
     """
 
+    user_prompt = f"""
+    User Explanation: {user_message}
+    """
+    # Three-attempt structure (exact wording from V1)
+    if attempt_count == 0:
+        user_prompt = (
+            "First attempt: If incorrect, give one broad hint. Encourage another try."
+        )
+    elif attempt_count == 1:
+        user_prompt = (
+            "Second attempt: If still incorrect, identify one missing element. Do NOT reveal the answer. Encourage final try."
+        )
+    elif attempt_count == 2:
+        user_prompt = (
+            "Third attempt: If correct, acknowledge and tell them to move to next concept. If incorrect, provide correct answer and tell them to move to next concept."
+        )
+    else:
+        user_prompt = (
+            "Three attempts completed. Tell them to move to next concept."
+        )
+
     enforcement_system = (
-        "You MUST respond only in English. If the user's input is in any other language, do NOT reply in that language; "
-        "instead, in English, politely ask the user to repeat their explanation in English because English is the language of this interaction. "
-        "Do not use emojis, emoticons, or any non-text decorations. Keep the reply short and instructive when asking for English."
+        "You must respond only in English. "
+        "If the user writes in another language, politely ask in English for them to repeat their explanation in English. "
+        "Keep that message short and clear."
     )
 
     def detect_non_english(text):
-        """Rudimentary non-English detector using Unicode script ranges for common non-Latin scripts."""
         if not text:
             return False
         non_latin_regex = re.compile(r"[\u0590-\u05FF\u0600-\u06FF\u0400-\u04FF\u0900-\u097F\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF]")
@@ -996,19 +1027,6 @@ def generate_response(user_message, concept_name, golden_answer, attempt_count, 
 
     if detect_non_english(user_message):
         return "Please repeat your explanation in English so I can provide feedback. This interaction uses English only."
-
-    user_prompt = f"""
-    User Explanation: {user_message}
-    """
-
-    if attempt_count == 0:
-        user_prompt += "\nFirst attempt: If incorrect, give one broad hint. Encourage another try."
-    elif attempt_count == 1:
-        user_prompt += "\nSecond attempt: If still incorrect, identify one missing element. Do NOT reveal the answer. Encourage final try."
-    elif attempt_count == 2:
-        user_prompt += "\nThird attempt: If correct, acknowledge and tell them to move to next concept. If incorrect, provide correct answer and tell them to move to next concept."
-    else:
-        user_prompt += "\nThree attempts completed. Tell them to move to next concept."
 
     try:
         messages = [
