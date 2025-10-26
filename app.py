@@ -403,6 +403,25 @@ def ssml_wrap(text, rate='0%', pitch='0%', break_ms=250):
         return text
 
 
+def clean_for_tts(text):
+    """Sanitize text before sending to plain-text TTS engines.
+    Removes any XML/HTML-like tags (including SSML <break/> tags) and
+    collapses multiple whitespace/newlines so that engines like gTTS do
+    not attempt to speak markup as literal words (which can produce
+    phrases like "line break" or similar).
+    """
+    try:
+        if not text:
+            return text
+        cleaned = re.sub(r"<[^>]+>", " ", text)
+        cleaned = cleaned.replace('\u200b', ' ')
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned
+    except Exception as e:
+        print(f"clean_for_tts failed: {e}")
+        return text
+
+
 @app.route('/synthesize', methods=['POST'])
 def synthesize():
     try:
@@ -421,7 +440,8 @@ def synthesize():
         try:
             from io import BytesIO
             bio = BytesIO()
-            tts = gTTS(text=text, lang='en')
+            cleaned_for_tts = clean_for_tts(ssml_text) or clean_for_tts(text)
+            tts = gTTS(text=cleaned_for_tts, lang='en')
             tts.write_to_fp(bio)
             bio.seek(0)
             return (bio.read(), 200, {'Content-Type': 'audio/mpeg', 'Content-Disposition': 'inline; filename="tts.mp3"'})
@@ -537,8 +557,9 @@ def generate_audio(text, file_path):
         except Exception as openai_err:
             print(f"OpenAI TTS not available or failed: {openai_err}. Falling back to gTTS.")
 
-        if len(text) > 500:
-            chunks = [text[i:i+500] for i in range(0, len(text), 500)]
+        sanitized_text = clean_for_tts(text)
+        if len(sanitized_text) > 500:
+            chunks = [sanitized_text[i:i+500] for i in range(0, len(sanitized_text), 500)]
             temp_files = []
 
             for i, chunk in enumerate(chunks):
@@ -889,7 +910,14 @@ def submit_message():
     task_folder = create_user_folders(participant_id, trial_type)
     ai_response_filename = get_audio_filename('AI', participant_id, trial_type, current_attempt_count + 1)
     audio_response_path = os.path.join(task_folder, ai_response_filename)
-    generate_audio(ai_response, audio_response_path)
+
+    # Generate AI audio asynchronously so we can return the textual response
+    # immediately to the client and avoid blocking while TTS runs.
+    try:
+        # executor is created during app startup (ThreadPoolExecutor)
+        executor.submit(generate_audio, ai_response, audio_response_path)
+    except Exception as e:
+        print(f"Failed to start async audio generation: {e}")
     
     try:
         session_id = session.get('session_id')
@@ -911,15 +939,12 @@ def submit_message():
     except Exception as e:
         print(f"Audio backup failed, but continuing: {str(e)}")
 
-    if not os.path.exists(audio_response_path):
-        print("Error: AI audio file not created!")  
-        return jsonify({'error': 'AI audio generation failed.'})
-
     trial_folder_map = {
         'Trial_1': 'main_task_1', 'Trial_2': 'main_task_2', 'Test': 'test_task'
     }
     trial_folder_name = trial_folder_map.get(trial_type, trial_type.lower())
     ai_audio_url = f"/uploads/UserData/{participant_id}/{trial_folder_name}/{ai_response_filename}"
+
     return jsonify({
         'response': ai_response,
         'ai_audio_url': ai_audio_url,
@@ -934,7 +959,6 @@ def generate_response(user_message, concept_name, golden_answer, attempt_count, 
     if not golden_answer or not concept_name:
         return "As your tutor, I'm not able to provide you with feedback without having context about your explanation. Please ensure the context is set."
     
-    # Build conversation history context
     history_context = ""
     if conversation_history and len(conversation_history) > 0:
         history_context = "\n\nPrevious conversation:\n"
