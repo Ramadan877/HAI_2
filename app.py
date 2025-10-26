@@ -3,6 +3,7 @@ from flask import Flask, request, render_template, jsonify, session, send_from_d
 from werkzeug.utils import secure_filename
 from flask_cors import CORS 
 import openai
+import re
 import requests
 import os.path
 from gtts import gTTS
@@ -964,60 +965,99 @@ def submit_message():
     })
 
 def generate_response(user_message, concept_name, golden_answer, attempt_count, conversation_history=None):
-    """Generate a response dynamically using OpenAI GPT with conversation history."""
+    """Generate short, supportive feedback for a 3-attempt self-explanation loop."""
+
+    import re
+    import openai
 
     if not golden_answer or not concept_name:
-        return "As your tutor, I'm not able to provide you with feedback without having context about your explanation. Please ensure the context is set."
-    
-    # Build conversation history context exactly like V1
+        return (
+            "I can’t provide feedback yet because the concept context isn’t set. "
+            "Please make sure both the concept and golden answer are defined."
+        )
+
     history_context = ""
     if conversation_history and len(conversation_history) > 0:
-        history_context = "\n\nPrevious conversation:\n"
-        for entry in conversation_history[-5:]:  # Last 5 interactions
-            history_context += f"- {entry}\n"
+        history_context = "\nRecent conversation:\n" + "\n".join(conversation_history[-3:])
 
+    # ==== Base prompt ====
     base_prompt = f"""
     Context: {concept_name}
     Golden Answer: {golden_answer}
-    User Explanation: {user_message}{history_context}
-    
-    You are a supportive tutor. Keep responses very brief (1-2 sentences max).
+    Student Explanation: {user_message}
+    {history_context}
 
-    Guidelines:
-    - Be encouraging but concise.
-    - Reference previous conversation when relevant to show you remember.
-    - Never reveal the golden answer until after the third attempt.
-    - When correct: confirm and tell them to move to the next concept.
-    - When incorrect: give one specific hint only.
-    - No emojis or lists.
+    You are a concise, friendly tutor guiding a student to understand a concept.
+    The tone should be supportive, motivating, and natural — not exaggerated or lengthy.
+
+    Rules:
+    - Keep your feedback under 3 sentences.
+    - Be positive and instructive, not overly enthusiastic.
+    - Never reveal or restate the golden answer before the third attempt.
+    - When the student's explanation is fully correct (matches the golden answer in meaning):
+        → Clearly confirm correctness and tell them to move on to the next concept.
+    - When the explanation is partially correct:
+        → Mention briefly what is right and what is missing or unclear. Give one short hint.
+    - When the explanation is incorrect:
+        → Identify one main misunderstanding and provide one small clue to rethink it.
+    - On the third attempt:
+        → If correct, confirm and tell them to move on.
+        → If still incorrect, briefly give the correct explanation and tell them to move on.
+    - Use plain English; no emojis, lists, or unnecessary formatting.
     """
 
-    user_prompt = f"""
-    User Explanation: {user_message}
-    """
-    # Three-attempt structure (exact wording from V1)
+    # ==== Attempt-level instruction ====
     if attempt_count == 0:
         user_prompt = (
-            "First attempt: If incorrect, give one broad hint. Encourage another try."
+            "This is the student's FIRST attempt. If not fully correct, provide general feedback "
+            "and one broad hint about what might be missing. Encourage them to try again."
         )
     elif attempt_count == 1:
         user_prompt = (
-            "Second attempt: If still incorrect, identify one missing element. Do NOT reveal the answer. Encourage final try."
+            "This is the student's SECOND attempt. If still incomplete, point out the missing element "
+            "or misconception but DO NOT reveal the correct answer. Encourage them for one last try."
         )
     elif attempt_count == 2:
         user_prompt = (
-            "Third attempt: If correct, acknowledge and tell them to move to next concept. If incorrect, provide correct answer and tell them to move to next concept."
+            "This is the student's THIRD and FINAL attempt. "
+            "If correct, confirm and tell them to move to the next concept. "
+            "If still incorrect, now briefly provide the correct explanation and guide them to move on."
         )
     else:
         user_prompt = (
-            "Three attempts completed. Tell them to move to next concept."
+            "The student has already completed three attempts. "
+            "Acknowledge their effort and tell them to move to the next concept."
         )
 
     enforcement_system = (
-        "You must respond only in English. "
-        "If the user writes in another language, politely ask in English for them to repeat their explanation in English. "
-        "Keep that message short and clear."
+        "Respond only in English. "
+        "If the student's input is not in English, ask politely in English to repeat it in English."
     )
+
+    non_english = re.compile(r"[\u0590-\u05FF\u0600-\u06FF\u0400-\u04FF\u0900-\u097F\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF]")
+    if non_english.search(user_message):
+        return "Please repeat your explanation in English so I can provide feedback."
+
+    messages = [
+        {"role": "system", "content": enforcement_system},
+        {"role": "system", "content": base_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            max_tokens=120,
+            temperature=0.4,
+        )
+        ai_response = response.choices[0].message.content.strip()
+        return ai_response
+
+    except Exception as e:
+        return f"Error generating AI response: {str(e)}"
+
+
 
     def detect_non_english(text):
         if not text:
