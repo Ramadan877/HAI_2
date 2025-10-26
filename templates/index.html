@@ -66,7 +66,6 @@
   
       <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
       <script src="{{ url_for('static', filename='js/trialType.js') }}"></script>
-    <!-- screenRecorder.js removed -->
       <script>
          document.addEventListener("DOMContentLoaded", function () {
               const avatar = document.getElementById("chat-avatar");
@@ -114,9 +113,7 @@
               let currentTrialType = ""; 
               let conceptBubbleTimeout = null;
               let isSubmitting = false;
-  
-              // loadPDF is called later once setup is complete to avoid race conditions
-              
+                
               function showConceptBubble(text) {
                   conceptIndicator.textContent = text;
                   conceptIndicator.classList.add('show');
@@ -804,9 +801,6 @@
                         if (data.ai_audio_url) {
                             stopMeteorOrbit();
 
-                            // Prefer server-side full-utterance synthesis for gap-free playback.
-                            // Try fetching /synthesize with the assistant text, decode via AudioContext
-                            // and play as a single buffer. Fall back to the server file URL if anything fails.
                             (async () => {
                                 try {
                                     const text = data.response || '';
@@ -831,7 +825,6 @@
                                     src.start(0);
                                 } catch (err) {
                                     console.error('TTS/playback error, falling back to server file:', err);
-                                    // fallback to the old server audio file playback
                                     aiAudio.src = data.ai_audio_url;
                                     aiAudio.play().catch(e => console.error('Fallback play failed', e));
                                 }

@@ -210,7 +210,6 @@ try:
     from flask_compress import Compress
     Compress(app)
 except Exception:
-    # flask_compress is optional; compression will be disabled if not installed
     pass
 
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL')
@@ -918,14 +917,14 @@ def generate_response(user_message, concept_name, golden_answer, attempt_count):
     Golden Answer: {golden_answer}
     User Explanation: {user_message}
     
-    You are a friendly and encouraging tutor, helping a student refine their understanding of a concept in a supportive way. Your goal is to evaluate the student's explanation of this concept and provide warm, engaging feedback:
-        - If the user's explanation includes all the relevant aspects of the golden answer, celebrate their effort and reinforce their confidence. Inform them that their explanation is correct and they have completed the self-explanation for this concept. Instruct them to proceed to the next concept.
-        - If the explanation is partially correct, acknowledge their progress and gently guide them toward refining their answer.
-        - If it's incorrect, provide constructive and positive feedback without discouraging them. Offer hints and encouragement.
-        - Do not provide the golden answer or parts of it directly. Instead, guide the user to arrive at it themselves.
-    Use a conversational tone, making the user feel comfortable and motivated to keep trying but refrain from using emojis in the text.
-    Ignore any emojis that are part of the user's explanation.
-    If the user is not talking about the current concept, guide them back to the task of self-explaining the current concept.
+    You are a supportive tutor. Keep responses very brief (1-2 sentences max).
+
+    Guidelines:
+    - Be encouraging but concise.
+    - Never reveal the golden answer until after the third attempt.
+    - When correct: confirm and tell them to move to the next concept.
+    - When incorrect: give one specific hint only.
+    - No emojis or lists.
     """
 
     enforcement_system = (
@@ -949,13 +948,13 @@ def generate_response(user_message, concept_name, golden_answer, attempt_count):
     """
 
     if attempt_count == 0:
-        user_prompt += "\nIf the explanation is correct, communicate this to the user. If it is not correct, provide general feedback and a broad hint to guide the user."
+        user_prompt += "\nFirst attempt: If incorrect, give one broad hint. Encourage another try."
     elif attempt_count == 1:
-        user_prompt += "\nIf the explanation is correct, communicate this to the user. If it is not correct, provide more specific feedback and highlight key elements the user missed."
+        user_prompt += "\nSecond attempt: If still incorrect, identify one missing element. Do NOT reveal the answer. Encourage final try."
     elif attempt_count == 2:
-        user_prompt += "\nIf the explanation is correct, communicate this to the user. If it is not correct, provide the correct explanation, as the user has made multiple attempts."
+        user_prompt += "\nThird attempt: If correct, acknowledge and tell them to move to next concept. If incorrect, provide correct answer and tell them to move to next concept."
     else:
-        user_prompt += "\nLet the user know they have completed three self-explanation attempts. Instruct them to stop here and tell them to continue with the next concept."
+        user_prompt += "\nThree attempts completed. Tell them to move to next concept."
 
     try:
         messages = [
@@ -964,12 +963,11 @@ def generate_response(user_message, concept_name, golden_answer, attempt_count):
             {"role": "user", "content": user_prompt}
         ]
 
-        # Synchronous, non-streaming call (kept for backward compatibility)
         response = openai.ChatCompletion.create(
             model="gpt-4o-mini",
             messages=messages,
-            max_tokens=200,
-            temperature=0.7,
+            max_tokens=100,
+            temperature=0.5,
         )
 
         ai_response = response.choices[0].message.content
@@ -984,7 +982,6 @@ def generate_response(user_message, concept_name, golden_answer, attempt_count):
 def stream_submit_message():
     """Streaming variant of /submit_message — returns partial text as it's generated."""
     try:
-        # process form identical to /submit_message up to generation
         participant_id = session.get('participant_id')
         trial_type = session.get('trial_type')
         if not participant_id or not trial_type:
@@ -1005,7 +1002,6 @@ def stream_submit_message():
 
         golden_answer = concepts[concept_name]['golden_answer']
 
-        # if audio is included, transcribe it
         user_transcript = ''
         if 'audio' in request.files:
             audio_file = request.files['audio']
@@ -1020,7 +1016,6 @@ def stream_submit_message():
                 except Exception:
                     user_transcript = speech_to_text(audio_path)
 
-        # Build messages
         base_prompt = f"""
         Context: {concept_name}
         Golden Answer: {golden_answer}
@@ -1034,19 +1029,17 @@ def stream_submit_message():
 
         def generate():
             try:
-                # Use streaming API if available
                 stream_resp = openai.ChatCompletion.create(
                     model='gpt-4o-mini',
                     messages=messages,
-                    max_tokens=200,
-                    temperature=0.7,
+                    max_tokens=100,
+                    temperature=0.5,
                     stream=True
                 )
 
                 accumulator = ''
                 for event in stream_resp:
                     try:
-                        # Extract token delta depending on response shape
                         token = ''
                         if isinstance(event, dict) and 'choices' in event:
                             ch = event['choices'][0]
@@ -1055,7 +1048,6 @@ def stream_submit_message():
                             elif 'text' in ch:
                                 token = ch.get('text', '')
                         elif hasattr(event, 'choices'):
-                            # fall back for client objects
                             try:
                                 token = event.choices[0].delta.get('content', '')
                             except Exception:
@@ -1067,7 +1059,6 @@ def stream_submit_message():
                     except Exception:
                         continue
 
-                # final newline to signal completion
                 yield '\n'
             except Exception as e:
                 yield f"[error] {str(e)}"
