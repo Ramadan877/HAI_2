@@ -1,3 +1,17 @@
+:root {
+    --primary-color: #00e5ff;
+    --secondary-color: #26c6da;
+    --accent-color: #7c4dff;
+    --background-dark: #0a0e1a;
+    --background-light: #1a1f2e;
+    --text-light: #ffffff;
+    --glass-bg: rgba(26, 31, 46, 0.8);
+    --glass-border: rgba(0, 229, 255, 0.1);
+    --shadow-sm: 0 2px 8px rgba(0, 229, 255, 0.1);
+    --shadow-md: 0 4px 16px rgba(0, 229, 255, 0.15);
+    --shadow-lg: 0 8px 32px rgba(0, 229, 255, 0.2);
+}
+
 body {
     display: flex;
     font-family: Arial, sans-serif;
@@ -216,42 +230,55 @@ body {
     z-index: 2000;
     transition: opacity 0.5s ease;
 }
+
 .start-trial-selector {
-    background-color: rgba(0, 0, 0, 0.7);
-    border-radius: 10px;
+    background: var(--glass-bg);
+    border: 1px solid var(--glass-border);
+    border-radius: 20px;
     padding: 25px;
-    box-shadow: 0 0 30px rgba(255, 255, 255, 0.3);
+    box-shadow: var(--shadow-md);
+    backdrop-filter: blur(20px);
     text-align: center;
     max-width: 400px;
     width: 100%;
 }
+
 .start-trial-title {
-    color: white;
+    color: var(--text-light);
     font-size: 24px;
     margin-bottom: 20px;
-    font-weight: 300;
+    font-weight: 400;
+    text-shadow: 0 0 15px rgba(0, 229, 255, 0.3);
 }
+
 .start-trial-buttons {
     display: flex;
     gap: 15px;
     justify-content: center;
     margin-bottom: 15px;
 }
+
 .start-trial-btn {
     padding: 12px 25px;
-    background-color: rgba(255, 255, 255, 0.1);
-    color: white;
-    border: 1px solid rgba(255, 255, 255, 0.3);
-    border-radius: 6px;
+    background: var(--glass-bg);
+    color: var(--text-light);
+    border: 1px solid var(--glass-border);
+    border-radius: 12px;
     cursor: pointer;
     transition: all 0.3s ease;
     font-size: 16px;
+    backdrop-filter: blur(10px);
+    box-shadow: var(--shadow-sm);
 }
+
 .start-trial-btn:hover {
-    background-color: rgba(255, 255, 255, 0.2);
+    background: var(--primary-color);
+    color: var(--background-dark);
+    border-color: var(--primary-color);
     transform: translateY(-2px);
-    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+    box-shadow: var(--shadow-md);
 }
+
 @keyframes spin {
     0% { transform: rotate(0deg); }
     100% { transform: rotate(360deg); }
@@ -329,21 +356,26 @@ body {
     text-align: center;
 }
 .start-interaction-btn {
-    background-color: #4fd1c5;
-    color: white;
-    border: none;
+    background: var(--primary-color);
+    color: var(--background-dark);
+    border: 1px solid rgba(0, 229, 255, 0.3);
     padding: 2rem 4rem;
     border-radius: 50px;
     font-size: 2rem;
     cursor: pointer;
     transition: all 0.3s ease;
-    box-shadow: 0 4px 15px rgba(79, 209, 197, 0.3);
+    box-shadow: 0 8px 32px rgba(0, 229, 255, 0.3), inset 0 1px 0 rgba(0, 229, 255, 0.2);
+    backdrop-filter: blur(10px);
 }
+
 .start-interaction-btn:hover {
-    background-color: #38b2ac;
+    background: var(--primary-color);
+    color: var(--background-dark);
+    border-color: var(--primary-color);
     transform: scale(1.05);
-    box-shadow: 0 6px 20px rgba(79, 209, 197, 0.4);
+    box-shadow: 0 12px 40px rgba(0, 229, 255, 0.4), inset 0 1px 0 rgba(0, 229, 255, 0.3);
 }
+
 .start-interaction-btn:active {
     transform: scale(0.95);
 }
