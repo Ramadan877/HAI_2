@@ -982,14 +982,11 @@ def generate_response(user_message, concept_name, golden_answer, attempt_count, 
         history_context = "\nRecent conversation:\n" + "\n".join(conversation_history[-3:])
 
     # === 2️⃣ Simple Similarity Check ===
-    # Normalize and compare similarity ratio between student's and golden answer
     def normalize(text):
         return re.sub(r'[^a-z0-9\s]', '', text.lower().strip())
 
     similarity = SequenceMatcher(None, normalize(user_message), normalize(golden_answer)).ratio()
 
-    # If user explanation is very close or matches the golden answer (≥0.8 similarity),
-    # acknowledge immediately and skip GPT generation
     if similarity >= 0.8:
         return (
             "Excellent — your explanation is clear and accurate. "
@@ -1027,12 +1024,12 @@ def generate_response(user_message, concept_name, golden_answer, attempt_count, 
     if attempt_count == 0:
         user_prompt = (
             "This is the student's FIRST attempt. If not fully correct, provide general feedback "
-            "and one broad hint about what might be missing. Encourage them to try again."
+            "and one broad hint about what might be missing in the form of a question."
         )
     elif attempt_count == 1:
         user_prompt = (
             "This is the student's SECOND attempt. If still incomplete, point out the missing element "
-            "or misconception but DO NOT reveal the correct answer. Encourage them for one last try."
+            "or misconception again in the form of a question but DO NOT reveal the correct answer. Encourage them for one last try."
         )
     elif attempt_count == 2:
         user_prompt = (
