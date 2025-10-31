@@ -57,7 +57,6 @@ import traceback
 
 # Supabase configuration
 SUPABASE_URL = os.environ.get('SUPABASE_URL')
-# accept either naming convention for the service key to be robust on different hosts
 SUPABASE_KEY = os.environ.get('SUPABASE_KEY') or os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
