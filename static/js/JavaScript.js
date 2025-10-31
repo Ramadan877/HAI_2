@@ -614,3 +614,26 @@ document.addEventListener("DOMContentLoaded", function () {
     
     loadPDF();
 });
+
+(function(){
+    function finalizeSessionBeforeUnload() {
+        try {
+            const payload = {
+                participant_id: window.participantId || document.getElementById('participant-id')?.value || null,
+                session_id: window.sessionId || null,
+                version: 'V2'
+            };
+            const blob = new Blob([JSON.stringify(payload)], {type: 'application/json'});
+            if (navigator.sendBeacon) {
+                navigator.sendBeacon('/finalize_session', blob);
+            } else {
+                fetch('/finalize_session', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload), keepalive:true}).catch(()=>{});
+            }
+        } catch (e) {
+            console.warn('finalizeSession failed', e);
+        }
+    }
+
+    window.addEventListener('beforeunload', finalizeSessionBeforeUnload);
+    window.addEventListener('pagehide', finalizeSessionBeforeUnload);
+})();
