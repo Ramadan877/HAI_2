@@ -55,13 +55,14 @@ load_dotenv()
 from supabase import create_client
 import traceback
 
-# Supabase configuration 
+# Supabase configuration
 SUPABASE_URL = os.environ.get('SUPABASE_URL')
-SUPABASE_SERVICE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY') or os.environ.get('SUPABASE_KEY')
+# accept either naming convention for the service key to be robust on different hosts
+SUPABASE_KEY = os.environ.get('SUPABASE_KEY') or os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
 supabase = None
-if SUPABASE_URL and SUPABASE_SERVICE_KEY:
+if SUPABASE_URL and SUPABASE_KEY:
     try:
-        supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
     except Exception as e:
         print('Warning: could not initialize Supabase client:', e)
 
@@ -129,6 +130,21 @@ def save_recording_to_db(session_id, recording_type, file_path, original_filenam
                         threading.Thread(target=upload_and_record_supabase, args=(file_path, session_id, participant_id, 'V2'), daemon=True).start()
                 except Exception as e:
                     print('Failed to schedule supabase upload task:', e)
+
+            # Always schedule a best-effort raw file upload (no metadata insert) using a safe dest path.
+            try:
+                safe_participant = participant_id or 'unknown_participant'
+                safe_session = session_id or 'unknown_session'
+                safe_rel = os.path.basename(file_path)
+                safe_dest = f"V2/{safe_participant}/{safe_session}/{safe_rel}"
+
+                if 'executor' in globals() and executor:
+                    executor.submit(upload_file_to_supabase, file_path, 'V2', safe_dest)
+                else:
+                    import threading
+                    threading.Thread(target=upload_file_to_supabase, args=(file_path, 'V2', safe_dest), daemon=True).start()
+            except Exception as e:
+                print('Failed to schedule raw supabase upload task:', e)
         except Exception:
             pass
 
@@ -164,7 +180,7 @@ def upload_file_to_supabase(local_path, bucket_name='V2', dest_path=None):
         size = os.path.getsize(local_path)
         return public_url, size
     except Exception as e:
-        print('Supabase upload_file_to_supabase error:', e)
+        print('❌ V2 upload error:', e)
         return None, None
 
 def upload_and_record_supabase(local_path, session_id=None, participant_id=None, version='V2'):
