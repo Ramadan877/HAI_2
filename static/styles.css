@@ -45,12 +45,10 @@ body {
     z-index: 0;
 }
 #pdf-canvas {
-        width: 75vw;
-        height: calc(100vh - 40px);
-        border-radius: 12px;
-        max-height: 100%;
-        box-shadow: var(--shadow-lg);
-        transition: var(--transition-default);
+    max-width: 100%;
+    max-height: 100vh;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
+    object-fit: contain;
 }
 .page-controls {
     position: fixed;
