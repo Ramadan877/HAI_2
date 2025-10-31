@@ -53,6 +53,7 @@ import uuid
 load_dotenv()
 
 from supabase import create_client
+import traceback
 
 # Supabase configuration 
 SUPABASE_URL = os.environ.get('SUPABASE_URL')
@@ -158,25 +159,32 @@ def upload_file_to_supabase(local_path, bucket_name='HAI', dest_path=None):
     except Exception as e:
         print('Supabase upload_file_to_supabase error:', e)
         return None, None
-
-
-def upload_and_record_supabase(local_path, session_id=None, participant_id=None, version='V2'):
-    """Upload file and insert metadata into `uploads` table in supabase."""
     try:
-        if supabase is None:
-            return None
-        if not os.path.exists(local_path):
-            return None
+        with open(local_path, 'rb') as f:
+            data = f.read()
+        storage = supabase.storage.from_(bucket_name)
+        try:
+            res = storage.upload(dest_path, data)
+            print('Supabase storage.upload response for', dest_path, ':', res)
+        except Exception as inner_e:
+            # print inner exception and continue to let outer except handle
+            print('Supabase storage.upload inner error for', dest_path, ':', inner_e)
+            traceback.print_exc()
 
-        safe_rel = os.path.basename(local_path)
-        participant_part = participant_id if participant_id else 'unknown'
+        public_url = f"{SUPABASE_URL}/storage/v1/object/public/{bucket_name}/{dest_path}"
+        size = os.path.getsize(local_path)
+        return public_url, size
+    except Exception as e:
+        print('Supabase upload_file_to_supabase error:', e)
+        traceback.print_exc()
+        return None, None
         sess_part = session_id if session_id else 'no_session'
         dest_path = f"{version}/{participant_part}/{sess_part}/{safe_rel}"
 
         public_url, size = upload_file_to_supabase(local_path, bucket_name='HAI', dest_path=dest_path)
         if public_url:
             try:
-                supabase.table('uploads').insert({
+                res = supabase.table('uploads').insert({
                     'session_id': session_id,
                     'participant_id': participant_id,
                     'version': version,
@@ -188,8 +196,10 @@ def upload_and_record_supabase(local_path, session_id=None, participant_id=None,
                     'file_size': size,
                     'metadata': {'local_path': local_path}
                 }).execute()
+                print('Supabase uploads.insert result for', dest_path, ':', res)
             except Exception as e:
-                print('Supabase metadata insert failed:', e)
+                print('Supabase metadata insert failed for', dest_path, ':', e)
+                traceback.print_exc()
         return public_url
     except Exception as e:
         print('upload_and_record_supabase error:', e)

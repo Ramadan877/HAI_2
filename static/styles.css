@@ -45,8 +45,6 @@ body {
     border-radius: 20px;
     backdrop-filter: blur(20px);
     box-shadow: var(--shadow-md);
-    position: relative;
-    z-index: 0;
 }
 #pdf-canvas {
     width: 75vw;
