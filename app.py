@@ -143,82 +143,53 @@ def save_recording_to_db(session_id, recording_type, file_path, original_filenam
 
 
 def upload_file_to_supabase(local_path, bucket_name='V2', dest_path=None):
-    """Upload local file to Supabase storage and return public URL and size. Best-effort."""
+    """Upload a local file to Supabase storage and return (public_url, size).
+    This matches the V1 implementation: best-effort, does not raise to caller
+    if Supabase is not configured. The caller is expected to provide the correct
+    local_path (absolute or relative to the app runtime).
+    """
     if supabase is None:
         return None, None
-
-    # Resolve actual file on disk. The caller may pass either an absolute path,
-    # a path relative to the app root, or a filename that lives under UPLOAD_FOLDER
-    candidates = [local_path]
-    # Common upload folders
-    try:
-        base_upload = UPLOAD_FOLDER
-    except NameError:
-        base_upload = os.path.normpath(os.path.join(os.path.dirname(__file__), 'uploads'))
-
-    candidates.append(os.path.join(base_upload, local_path))
-    candidates.append(os.path.join(base_upload, 'User Data', local_path))
-    candidates.append(os.path.join(base_upload, 'User Data', os.path.basename(local_path)))
-    candidates.append(os.path.join(base_upload, 'concept_audio', os.path.basename(local_path)))
-    candidates.append(os.path.join(base_upload, 'intro_audio', os.path.basename(local_path)))
-
-    found = None
-    for p in candidates:
-        if p and os.path.exists(p):
-            found = os.path.normpath(p)
-            break
-
-    if not found:
-        # As a last resort, try to find the file by walking the upload folder
-        for root, _, files in os.walk(base_upload):
-            if os.path.basename(local_path) in files:
-                found = os.path.join(root, os.path.basename(local_path))
-                break
-
-    if not found:
-        print(f"Supabase upload_file_to_supabase: file not found: {local_path}")
-        return None, None
-
-    # If dest_path not provided, preserve the path relative to UPLOAD_FOLDER so
-    # storage mirrors local folder structure.
     if not dest_path:
-        try:
-            rel = os.path.relpath(found, base_upload)
-        except Exception:
-            rel = os.path.basename(found)
-        dest_path = rel.replace(os.sep, '/')
+        dest_path = os.path.basename(local_path)
 
     try:
-        with open(found, 'rb') as f:
+        with open(local_path, 'rb') as f:
             data = f.read()
+
         storage = supabase.storage.from_(bucket_name)
         storage.upload(dest_path, data)
+
         public_url = f"{SUPABASE_URL}/storage/v1/object/public/{bucket_name}/{dest_path}"
-        size = os.path.getsize(found)
-        return public_url, size, dest_path
+        size = os.path.getsize(local_path)
+        return public_url, size
     except Exception as e:
         print('Supabase upload_file_to_supabase error:', e)
-        return None, None, None
+        return None, None
 
 def upload_and_record_supabase(local_path, session_id=None, participant_id=None, version='V2'):
     """Upload file and insert metadata into `uploads` table in supabase."""
     try:
         if supabase is None:
             return None
+        if not os.path.exists(local_path):
+            return None
 
-        # Determine a sensible storage destination path based on the actual
-        # local file location so Supabase mirrors the Render upload folder layout.
-        public_url, size, uploaded_path = upload_file_to_supabase(local_path, bucket_name='V2', dest_path=None)
+        # dest path namespaced by version/participant/session
+        safe_rel = os.path.basename(local_path)
+        participant_part = participant_id if participant_id else 'unknown'
+        sess_part = session_id if session_id else 'no_session'
+        dest_path = f"{version}/{participant_part}/{sess_part}/{safe_rel}"
+
+        public_url, size = upload_file_to_supabase(local_path, bucket_name='V2', dest_path=dest_path)
         if public_url:
             try:
-                safe_rel = os.path.basename(uploaded_path) if uploaded_path else os.path.basename(local_path)
                 supabase.table('uploads').insert({
                     'session_id': session_id,
                     'participant_id': participant_id,
                     'version': version,
                     'bucket': 'V2',
-                    # path stored should match the storage path we returned
-                    'path': uploaded_path,
+                    'path': dest_path,
                     'public_url': public_url,
                     'file_name': safe_rel,
                     'file_type': None,
