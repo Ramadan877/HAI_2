@@ -31,8 +31,6 @@ body {
     flex-direction: column;
     align-items: center;
     position: relative;
-    transition: var(--transition-default);
-    backdrop-filter: blur(10px);
 }
 #pdf-container {
     width: 100%;

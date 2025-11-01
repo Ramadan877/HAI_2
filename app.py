@@ -640,6 +640,24 @@ def initialize_log_file(interaction_id, participant_id, trial_type):
             file.write("\n" + "-" * 80 + "\n\n")
         
         app.config['CURRENT_LOG_FILE'] = log_file_path
+
+        # Schedule upload of the log file to Supabase (best-effort).
+        try:
+            sess_id = session.get('session_id')
+            pid = participant_id or session.get('participant_id') or 'unknown_participant'
+            safe_rel = os.path.basename(log_file_path)
+            safe_dest = f"V2/{pid}/{sess_id or 'unknown_session'}/{safe_rel}"
+
+            if supabase:
+                if 'executor' in globals() and executor:
+                    executor.submit(upload_and_record_supabase, log_file_path, sess_id, pid, 'V2')
+                    executor.submit(upload_file_to_supabase, log_file_path, 'V2', safe_dest)
+                else:
+                    threading.Thread(target=upload_and_record_supabase, args=(log_file_path, sess_id, pid, 'V2'), daemon=True).start()
+                    threading.Thread(target=upload_file_to_supabase, args=(log_file_path, 'V2', safe_dest), daemon=True).start()
+        except Exception as e:
+            print('Failed to schedule log file upload:', e)
+
         return True
     except Exception as e:
         print(f"Error initializing log file: {str(e)}")
@@ -665,6 +683,23 @@ def log_interaction(speaker, concept_name, text):
             file.write(f"[{timestamp}] {speaker}: {text}\n\n")
             
         print(f"Interaction logged: {speaker} in file {current_log_file}")
+
+        # Schedule an upload of the updated log file to Supabase (best-effort)
+        try:
+            sess_id = session.get('session_id')
+            pid = session.get('participant_id') or 'unknown_participant'
+            safe_rel = os.path.basename(current_log_file)
+            safe_dest = f"V2/{pid}/{sess_id or 'unknown_session'}/{safe_rel}"
+
+            if supabase:
+                if 'executor' in globals() and executor:
+                    executor.submit(upload_and_record_supabase, current_log_file, sess_id, pid, 'V2')
+                    executor.submit(upload_file_to_supabase, current_log_file, 'V2', safe_dest)
+                else:
+                    threading.Thread(target=upload_and_record_supabase, args=(current_log_file, sess_id, pid, 'V2'), daemon=True).start()
+                    threading.Thread(target=upload_file_to_supabase, args=(current_log_file, 'V2', safe_dest), daemon=True).start()
+        except Exception as e:
+            print('Failed to schedule log upload after append:', e)
         return True
     except Exception as e:
         print(f"Error logging interaction: {str(e)}")
