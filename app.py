@@ -43,6 +43,7 @@ import logging
 import re
 import gc
 import threading
+import time
 from functools import lru_cache
 from functools import wraps
 from concurrent.futures import ThreadPoolExecutor
@@ -242,15 +243,26 @@ def schedule_file_uploads(local_path, session_id=None, participant_id=None, vers
         safe_rel = os.path.basename(local_path)
         safe_dest = f"{version}/{safe_participant}/{safe_session}/{safe_rel}"
 
-        # schedule metadata insert + raw upload
+        # schedule metadata insert + raw upload after a short delay to allow any in-progress writes to finish
         if supabase:
             try:
+                def _delayed_upload(p, s, pid, ver, rtype, att, cname, dest, delay=1.5):
+                    try:
+                        time.sleep(delay)
+                        # call upload_and_record_supabase which uploads file and inserts metadata
+                        upload_and_record_supabase(p, s, pid, version=ver, recording_type=rtype, attempt_number=att, concept_name=cname)
+                        # ensure raw upload is present as well (upload_and_record_supabase already does this, but keep as safe)
+                        try:
+                            upload_file_to_supabase(p, ver, dest)
+                        except Exception:
+                            pass
+                    except Exception as e:
+                        print('Delayed upload failed:', e)
+
                 if 'executor' in globals() and executor:
-                    executor.submit(upload_and_record_supabase, local_path, safe_session if safe_session != 'unknown_session' else None, safe_participant if safe_participant != 'unknown_participant' else None, version, recording_type, attempt_number, concept_name)
-                    executor.submit(upload_file_to_supabase, local_path, version, safe_dest)
+                    executor.submit(_delayed_upload, local_path, safe_session if safe_session != 'unknown_session' else None, safe_participant if safe_participant != 'unknown_participant' else None, version, recording_type, attempt_number, concept_name, safe_dest)
                 else:
-                    threading.Thread(target=upload_and_record_supabase, args=(local_path, safe_session if safe_session != 'unknown_session' else None, safe_participant if safe_participant != 'unknown_participant' else None, version, recording_type, attempt_number, concept_name), daemon=True).start()
-                    threading.Thread(target=upload_file_to_supabase, args=(local_path, version, safe_dest), daemon=True).start()
+                    threading.Thread(target=_delayed_upload, args=(local_path, safe_session if safe_session != 'unknown_session' else None, safe_participant if safe_participant != 'unknown_participant' else None, version, recording_type, attempt_number, concept_name, safe_dest), daemon=True).start()
             except Exception as e:
                 print('Failed to schedule uploads via schedule_file_uploads:', e)
     except Exception as e:
@@ -1242,9 +1254,34 @@ def generate_response(user_message, concept_name, golden_answer, attempt_count, 
     def normalize(text):
         return re.sub(r'[^a-z0-9\s]', '', text.lower().strip())
 
+    # quick heuristic to catch empty / filler / meaningless replies so the AI does not incorrectly praise them
+    def is_filler(s):
+        if not s or not str(s).strip():
+            return True
+        s2 = str(s).strip().lower()
+        if len(s2) < 3:
+            return True
+        fillers = {'ok', 'okay', 'yes', 'no', 'mm', 'mmm', 'hmm', 'uh', 'uhh', 'fine', 'sure', 'i dont know', 'idk', 'not sure'}
+        if s2 in fillers:
+            return True
+        if re.match(r'^[\.\,\-\s]+$', s2):
+            return True
+        return False
+
+    if is_filler(user_message):
+        # Do not treat very short / filler responses as correct. Encourage focus, unless it's the final attempt.
+        if attempt_count >= 2:
+            # On the last attempt reveal the golden answer then move on
+            return f"{golden_answer} You can now move on to the next concept."
+        else:
+            return f"I couldn't understand your explanation — it was too brief or unclear. Please focus on the main idea of {concept_name} and try again."
+
     similarity = SequenceMatcher(None, normalize(user_message), normalize(golden_answer)).ratio()
 
     if similarity >= 0.8:
+        # If it's the third attempt or beyond, include the exact golden answer before asking to move on.
+        if attempt_count >= 2:
+            return f"{golden_answer} You’re correct. You can now move on to the next concept."
         return (
             "Excellent — your explanation is clear and accurate. "
             "You’ve captured the main idea correctly. "
@@ -1297,7 +1334,7 @@ def generate_response(user_message, concept_name, golden_answer, attempt_count, 
     else:
         user_prompt = (
             "The student has already completed three attempts. "
-            "Acknowledge their effort and tell them to move to the next concept."
+            "Acknowledge their effort, give them the correct answer {golden_answer}, and tell them to move to the next concept."
         )
 
     enforcement_system = (
