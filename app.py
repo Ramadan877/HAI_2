@@ -662,6 +662,30 @@ def clean_for_tts(text):
         return text
 
 
+def clean_tts_text(text: str) -> str:
+    """
+    Clean text before sending to Text-to-Speech.
+    Removes symbols, markdown, and formatting artifacts so TTS sounds natural.
+    """
+    if not text:
+        return ""
+    # Remove URLs
+    text = re.sub(r'http\S+', '', text)
+    # Remove markdown & code artifacts
+    text = re.sub(r'[*_#`~<>^{}\[\]|]', '', text)
+    # Replace slashes and backslashes with space (pause)
+    text = re.sub(r'[\\/]', ' ', text)
+    # Remove multiple punctuation (e.g., '!!!' -> '!')
+    text = re.sub(r'([!?.,])\1+', r'\1', text)
+    # Remove stray hyphens, underscores, and symbols
+    text = re.sub(r'[-_=+]', ' ', text)
+    # Replace multiple spaces or newlines with single space
+    text = re.sub(r'\s+', ' ', text)
+    # Trim
+    text = text.strip()
+    return text
+
+
 @app.route('/synthesize', methods=['POST'])
 def synthesize():
     try:
@@ -680,7 +704,7 @@ def synthesize():
         try:
             from io import BytesIO
             bio = BytesIO()
-            cleaned_for_tts = clean_for_tts(ssml_text) or clean_for_tts(text)
+            cleaned_for_tts = clean_tts_text(ssml_text) or clean_tts_text(text)
             tts = gTTS(text=cleaned_for_tts, lang='en')
             tts.write_to_fp(bio)
             bio.seek(0)
@@ -717,18 +741,15 @@ def initialize_log_file(interaction_id, participant_id, trial_type):
             file.write(f"TIMESTAMP: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             file.write("\n" + "-" * 80 + "\n\n")
         
-        # store current log file per-session to avoid cross-session overwrites
         try:
             session['CURRENT_LOG_FILE'] = log_file_path
         except Exception:
-            # fallback to app config if session not available
             app.config['CURRENT_LOG_FILE'] = log_file_path
 
         # Schedule upload of the log file to Supabase (best-effort).
         try:
             sess_id = session.get('session_id')
             pid = participant_id or session.get('participant_id') or 'unknown_participant'
-            # Schedule a delayed upload that will overwrite the stored file when updated
             if supabase:
                 try:
                     schedule_file_uploads(log_file_path, session_id=sess_id, participant_id=pid, version='V2', recording_type='conversation_log')
@@ -758,7 +779,6 @@ def log_interaction(speaker, concept_name, text):
             initialize_log_file(interaction_id, participant_id, trial_type)
             current_log_file = session.get('CURRENT_LOG_FILE') or app.config.get('CURRENT_LOG_FILE')
         
-        # append and ensure data is flushed to disk before scheduling uploads
         try:
             with open(current_log_file, "a", encoding="utf-8") as file:
                 file.write(f"[{timestamp}] {speaker}: {text}\n\n")
@@ -833,7 +853,6 @@ def generate_audio(text, file_path, session_id=None, participant_id=None, record
                 with open(file_path, 'wb') as f:
                     f.write(audio_bytes)
                 print(f"Audio file (OpenAI TTS) saved: {file_path} (content_type={content_type})")
-                # Schedule background uploads for the generated AI audio (include metadata when available)
                 try:
                     schedule_file_uploads(file_path, session_id=session_id, participant_id=participant_id, version='V2', recording_type=recording_type, attempt_number=attempt_number, concept_name=concept_name)
                 except Exception:
@@ -842,7 +861,7 @@ def generate_audio(text, file_path, session_id=None, participant_id=None, record
         except Exception as openai_err:
             print(f"OpenAI TTS not available or failed: {openai_err}. Falling back to gTTS.")
 
-        sanitized_text = clean_for_tts(text)
+        sanitized_text = clean_tts_text(text)
         if len(sanitized_text) > 500:
             chunks = [sanitized_text[i:i+500] for i in range(0, len(sanitized_text), 500)]
             temp_files = []
@@ -1211,7 +1230,6 @@ def submit_message():
 
     task_folder = create_user_folders(participant_id, trial_type)
     ai_response_filename = get_audio_filename('AI', participant_id, trial_type, current_attempt_count + 1)
-    # make filename unique to avoid overwriting previous AI responses for the same attempt
     name, ext = os.path.splitext(ai_response_filename)
     ai_response_filename = f"{name}_{uuid.uuid4().hex[:8]}{ext}"
     audio_response_path = os.path.join(task_folder, ai_response_filename)
@@ -1382,8 +1400,8 @@ def generate_response(user_message, concept_name, golden_answer, attempt_count, 
         # If majority of letters are Latin, consider it English-friendly
         return (latin_letters / total_letters) >= 0.6
 
-    if not is_likely_english(user_message):
-        return "Please repeat your explanation in English so I can provide feedback."
+    # Be tolerant for non-native accents and allow the model to attempt interpretation.
+    # Only ask to repeat in English later if the AI cannot make sense of the input.
 
     messages = [
         {"role": "system", "content": enforcement_system},
@@ -1406,30 +1424,7 @@ def generate_response(user_message, concept_name, golden_answer, attempt_count, 
 
 
 
-    # Final safeguard: if message is very unlikely to be English, ask to repeat in English.
-    if not is_likely_english(user_message):
-        return "Please repeat your explanation in English so I can provide feedback. This interaction uses English only."
-
-    try:
-        messages = [
-            {"role": "system", "content": enforcement_system},
-            {"role": "system", "content": base_prompt},
-            {"role": "user", "content": user_prompt}
-        ]
-
-        response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
-            messages=messages,
-            max_tokens=80,
-            temperature=0.4,
-        )
-
-        ai_response = response.choices[0].message.content
-        attempt_count += 1
-        session['attempt_count'] = attempt_count
-        return ai_response
-    except Exception as e:
-        return f"Error generating AI response: {str(e)}"
+    
 
 
 @app.route('/stream_submit_message', methods=['POST'])
