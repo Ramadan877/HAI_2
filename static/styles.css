@@ -41,29 +41,27 @@ body {
   background: transparent;
 }
 
-/* The centered white slide box */
 #pdf-wrapper {
+  width: 75vw;
+  height: calc(100vh - 40px);
+  max-width: 1200px;
+  max-height: 90vh;
   background: white;
-  border-radius: 20px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+  border-radius: 12px;              
+  box-shadow: var(--shadow-lg);
   display: flex;
   justify-content: center;
   align-items: center;
-  overflow: hidden;           
-  width: 75vw;               
-  height: calc(100vh - 30px); 
-  max-width: 1200px;          
-  max-height: 90vh;          
+  overflow: hidden;                 
 }
 
-/* The PDF canvas itself */
 #pdf-canvas {
-  display: block;
   width: 100%;
-  height: calc(100vh - 30px); 
+  height: 100%;
   object-fit: contain;
-  border-radius: 12px;
+  border-radius: 12px;              
   background: white;
+  box-shadow: none;
 }
 
 .page-controls {
