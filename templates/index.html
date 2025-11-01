@@ -337,6 +337,25 @@
                   loadingSpinner.style.display = 'block';
 
                   pdfDoc.getPage(num).then(function(page) {
+                      // Calculate a dynamic scale so the PDF page fits inside the wrapper
+                      // without changing other rendering behavior. We compute the unscaled
+                      // page size then choose the scale that fits the wrapper's width/height.
+                      const unscaledViewport = page.getViewport({ scale: 1 });
+
+                      const wrapper = document.getElementById('pdf-wrapper') || pdfCanvas.parentElement;
+                      const containerWidth = (wrapper && wrapper.clientWidth) || window.innerWidth;
+                      // Use available height from wrapper if present, otherwise use a sensible portion of the window
+                      const containerHeight = (wrapper && wrapper.clientHeight) || Math.floor(window.innerHeight * 0.7);
+
+                      // Determine scale that fits both width and height
+                      let desiredScale = Math.min(containerWidth / unscaledViewport.width, containerHeight / unscaledViewport.height);
+
+                      // Avoid extremely large or zero scales
+                      if (!isFinite(desiredScale) || desiredScale <= 0) desiredScale = 1;
+
+                      // Update the (previously static) global scale so other code that reads it stays consistent
+                      scale = desiredScale;
+
                       const viewport = page.getViewport({ scale: scale });
 
                       const outputScale = window.devicePixelRatio || 1;
