@@ -173,6 +173,13 @@ def upload_file_to_supabase(local_path, bucket_name='V2', dest_path=None):
             data = f.read()
 
         storage = supabase.storage.from_(bucket_name)
+        # Attempt to remove existing object first to ensure we overwrite the stored file.
+        try:
+            storage.remove([dest_path])
+        except Exception:
+            # ignore removal errors (object may not exist or remove not supported)
+            pass
+
         storage.upload(dest_path, data)
 
         public_url = f"{SUPABASE_URL}/storage/v1/object/public/{bucket_name}/{dest_path}"
@@ -246,9 +253,30 @@ def schedule_file_uploads(local_path, session_id=None, participant_id=None, vers
         # schedule metadata insert + raw upload after a short delay to allow any in-progress writes to finish
         if supabase:
             try:
-                def _delayed_upload(p, s, pid, ver, rtype, att, cname, dest, delay=1.5):
+                def _delayed_upload(p, s, pid, ver, rtype, att, cname, dest, mtime_at_schedule, delay=1.5):
                     try:
                         time.sleep(delay)
+                        # wait until file's mtime stabilizes to reduce race with writes
+                        try:
+                            tries = 0
+                            while True:
+                                try:
+                                    current_mtime = os.path.getmtime(p)
+                                except Exception:
+                                    current_mtime = None
+                                if current_mtime is None:
+                                    break
+                                if current_mtime == mtime_at_schedule:
+                                    break
+                                # update observed mtime and wait a short time for more changes
+                                mtime_at_schedule = current_mtime
+                                time.sleep(0.5)
+                                tries += 1
+                                if tries >= 6:
+                                    break
+                        except Exception:
+                            pass
+
                         # call upload_and_record_supabase which uploads file and inserts metadata
                         upload_and_record_supabase(p, s, pid, version=ver, recording_type=rtype, attempt_number=att, concept_name=cname)
                         # ensure raw upload is present as well (upload_and_record_supabase already does this, but keep as safe)
@@ -259,10 +287,14 @@ def schedule_file_uploads(local_path, session_id=None, participant_id=None, vers
                     except Exception as e:
                         print('Delayed upload failed:', e)
 
+                try:
+                    mtime = os.path.getmtime(local_path)
+                except Exception:
+                    mtime = None
                 if 'executor' in globals() and executor:
-                    executor.submit(_delayed_upload, local_path, safe_session if safe_session != 'unknown_session' else None, safe_participant if safe_participant != 'unknown_participant' else None, version, recording_type, attempt_number, concept_name, safe_dest)
+                    executor.submit(_delayed_upload, local_path, safe_session if safe_session != 'unknown_session' else None, safe_participant if safe_participant != 'unknown_participant' else None, version, recording_type, attempt_number, concept_name, safe_dest, mtime)
                 else:
-                    threading.Thread(target=_delayed_upload, args=(local_path, safe_session if safe_session != 'unknown_session' else None, safe_participant if safe_participant != 'unknown_participant' else None, version, recording_type, attempt_number, concept_name, safe_dest), daemon=True).start()
+                    threading.Thread(target=_delayed_upload, args=(local_path, safe_session if safe_session != 'unknown_session' else None, safe_participant if safe_participant != 'unknown_participant' else None, version, recording_type, attempt_number, concept_name, safe_dest, mtime), daemon=True).start()
             except Exception as e:
                 print('Failed to schedule uploads via schedule_file_uploads:', e)
     except Exception as e:
@@ -696,16 +728,12 @@ def initialize_log_file(interaction_id, participant_id, trial_type):
         try:
             sess_id = session.get('session_id')
             pid = participant_id or session.get('participant_id') or 'unknown_participant'
-            safe_rel = os.path.basename(log_file_path)
-            safe_dest = f"V2/{pid}/{sess_id or 'unknown_session'}/{safe_rel}"
-
+            # Schedule a delayed upload that will overwrite the stored file when updated
             if supabase:
-                if 'executor' in globals() and executor:
-                    executor.submit(upload_and_record_supabase, log_file_path, sess_id, pid, 'V2')
-                    executor.submit(upload_file_to_supabase, log_file_path, 'V2', safe_dest)
-                else:
-                    threading.Thread(target=upload_and_record_supabase, args=(log_file_path, sess_id, pid, 'V2'), daemon=True).start()
-                    threading.Thread(target=upload_file_to_supabase, args=(log_file_path, 'V2', safe_dest), daemon=True).start()
+                try:
+                    schedule_file_uploads(log_file_path, session_id=sess_id, participant_id=pid, version='V2', recording_type='conversation_log')
+                except Exception as e:
+                    print('Failed to schedule log file upload via schedule_file_uploads:', e)
         except Exception as e:
             print('Failed to schedule log file upload:', e)
 
@@ -748,16 +776,11 @@ def log_interaction(speaker, concept_name, text):
         try:
             sess_id = session.get('session_id')
             pid = session.get('participant_id') or 'unknown_participant'
-            safe_rel = os.path.basename(current_log_file)
-            safe_dest = f"V2/{pid}/{sess_id or 'unknown_session'}/{safe_rel}"
-
             if supabase:
-                if 'executor' in globals() and executor:
-                    executor.submit(upload_and_record_supabase, current_log_file, sess_id, pid, 'V2')
-                    executor.submit(upload_file_to_supabase, current_log_file, 'V2', safe_dest)
-                else:
-                    threading.Thread(target=upload_and_record_supabase, args=(current_log_file, sess_id, pid, 'V2'), daemon=True).start()
-                    threading.Thread(target=upload_file_to_supabase, args=(current_log_file, 'V2', safe_dest), daemon=True).start()
+                try:
+                    schedule_file_uploads(current_log_file, session_id=sess_id, participant_id=pid, version='V2', recording_type='conversation_log')
+                except Exception as e:
+                    print('Failed to schedule log upload after append via schedule_file_uploads:', e)
         except Exception as e:
             print('Failed to schedule log upload after append:', e)
         return True
@@ -1342,8 +1365,24 @@ def generate_response(user_message, concept_name, golden_answer, attempt_count, 
         "If the student's input is not in English, ask politely in English to repeat it in English."
     )
 
-    non_english = re.compile(r"[\u0590-\u05FF\u0600-\u06FF\u0400-\u04FF\u0900-\u097F\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF]")
-    if non_english.search(user_message):
+    # Heuristic: check whether the message is likely English by comparing
+    # ASCII/Latin letters to total alphabetic characters. This avoids
+    # false positives when short/simple English words are used.
+    def is_likely_english(text):
+        if not text or not str(text).strip():
+            return False
+        txt = str(text)
+        # Count alphabetic characters and Latin (A-Za-z) characters
+        letters = [c for c in txt if c.isalpha()]
+        if not letters:
+            # If there are no alphabetic letters, fall back to checking for ASCII letters
+            return bool(re.search(r'[A-Za-z]', txt))
+        total_letters = len(letters)
+        latin_letters = sum(1 for c in letters if 'a' <= c.lower() <= 'z')
+        # If majority of letters are Latin, consider it English-friendly
+        return (latin_letters / total_letters) >= 0.6
+
+    if not is_likely_english(user_message):
         return "Please repeat your explanation in English so I can provide feedback."
 
     messages = [
@@ -1367,13 +1406,8 @@ def generate_response(user_message, concept_name, golden_answer, attempt_count, 
 
 
 
-    def detect_non_english(text):
-        if not text:
-            return False
-        non_latin_regex = re.compile(r"[\u0590-\u05FF\u0600-\u06FF\u0400-\u04FF\u0900-\u097F\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF]")
-        return bool(non_latin_regex.search(text))
-
-    if detect_non_english(user_message):
+    # Final safeguard: if message is very unlikely to be English, ask to repeat in English.
+    if not is_likely_english(user_message):
         return "Please repeat your explanation in English so I can provide feedback. This interaction uses English only."
 
     try:
@@ -1612,14 +1646,11 @@ def log_user_interaction(interaction_type, details):
             try:
                 sess_id = session.get('session_id')
                 pid = session.get('participant_id') or 'unknown_participant'
-                safe_dest = f"V2/{pid}/{sess_id or 'unknown_session'}/{os.path.basename(current_log_file)}"
                 if supabase:
-                    if 'executor' in globals() and executor:
-                        executor.submit(upload_and_record_supabase, current_log_file, sess_id, pid, 'V2')
-                        executor.submit(upload_file_to_supabase, current_log_file, 'V2', safe_dest)
-                    else:
-                        threading.Thread(target=upload_and_record_supabase, args=(current_log_file, sess_id, pid, 'V2'), daemon=True).start()
-                        threading.Thread(target=upload_file_to_supabase, args=(current_log_file, 'V2', safe_dest), daemon=True).start()
+                    try:
+                        schedule_file_uploads(current_log_file, session_id=sess_id, participant_id=pid, version='V2', recording_type='conversation_log')
+                    except Exception as e:
+                        print('Failed to schedule log upload in log_user_interaction via schedule_file_uploads:', e)
             except Exception as e:
                 print('Failed to schedule log upload in log_user_interaction:', e)
 
