@@ -17,7 +17,7 @@ body {
     font-family: Arial, sans-serif;
     margin: 0;
     padding: 0;
-    background-color: #1e293b;
+    background: linear-gradient(135deg, var(--background-dark) 0%, var(--background-light) 50%, #2a1f3d 100%);
     color: #ffffff;
     justify-content: center;
     align-items: center;
@@ -31,6 +31,8 @@ body {
     flex-direction: column;
     align-items: center;
     position: relative;
+    transition: var(--transition-default);
+    backdrop-filter: blur(10px);
 }
 #pdf-container {
     width: 100%;
@@ -51,6 +53,7 @@ body {
     object-fit: contain;
     padding: 20px 0;
     border-radius: 20px;
+    overflow: hidden;
     box-sizing: border-box;
     box-shadow: var(--shadow-lg);
     object-fit: contain;

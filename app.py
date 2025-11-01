@@ -260,6 +260,49 @@ def save_audio_with_cloud_backup(audio_data, filename, session_id, recording_typ
             with open(local_path, 'wb') as f:
                 f.write(audio_data)
         
+        # Schedule a best-effort background upload to Supabase with metadata when possible.
+        try:
+            # try to resolve participant_id if not provided via session_id
+            participant_id = None
+            try:
+                participant_id = session.get('participant_id')
+            except Exception:
+                participant_id = None
+
+            if not participant_id and session_id:
+                try:
+                    sess = Session.query.filter_by(session_id=session_id).first()
+                    participant_id = sess.participant_id if sess else None
+                except Exception:
+                    participant_id = None
+
+            # Schedule metadata upload (upload_and_record_supabase) if possible
+            if supabase:
+                try:
+                    if 'executor' in globals() and executor:
+                        executor.submit(upload_and_record_supabase, local_path, session_id, participant_id, 'V2')
+                    else:
+                        threading.Thread(target=upload_and_record_supabase, args=(local_path, session_id, participant_id, 'V2'), daemon=True).start()
+                except Exception as e:
+                    print('Failed to schedule upload_and_record_supabase from save_audio_with_cloud_backup:', e)
+
+            # Also always schedule a raw file upload to the storage with safe fallbacks for path components
+            try:
+                safe_participant = participant_id or 'unknown_participant'
+                safe_session = session_id or 'unknown_session'
+                safe_rel = os.path.basename(local_path)
+                safe_dest = f"V2/{safe_participant}/{safe_session}/{safe_rel}"
+
+                if 'executor' in globals() and executor:
+                    executor.submit(upload_file_to_supabase, local_path, 'V2', safe_dest)
+                else:
+                    threading.Thread(target=upload_file_to_supabase, args=(local_path, 'V2', safe_dest), daemon=True).start()
+            except Exception as e:
+                print('Failed to schedule raw upload_file_to_supabase from save_audio_with_cloud_backup:', e)
+
+        except Exception as e:
+            print('Error scheduling cloud backup upload:', e)
+
         return local_path, None
     except Exception as e:
         print(f"Error in save_audio_with_cloud_backup: {str(e)}")
