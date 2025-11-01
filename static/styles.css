@@ -64,30 +64,33 @@ body {
   align-items: center;
   height: 100vh;
   background: transparent;
-  position: relative;
 }
 
 /* White framed slide box (centered, curved edges) */
 #pdf-wrapper {
   background: white;
-  border-radius: 25px;         /* curved edges */
-  overflow: hidden;            /* clip PDF content */
+  border-radius: 20px;
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
-  max-width: 80vw;             /* keeps it from filling the screen */
-  max-height: 80vh;            /* keeps it centered nicely */
+  padding: 0;                     /* no padding to avoid cutting content */
   display: flex;
   justify-content: center;
   align-items: center;
+  max-width: 80vw;
+  max-height: calc(100vh - 60px);
+  overflow: visible;   
 }
 
 /* PDF canvas inside the box */
 #pdf-canvas {
-  width: 100%;
-  height: auto;
+  width: 75vw;                    /* keeps a nice centered size */
+  height: calc(100vh - 40px);
+  border-radius: 12px;            /* subtle curve on the slide */
+  max-height: 100%;
+  box-shadow: var(--shadow-lg);
+  transition: var(--transition-default);
+  object-fit: contain;            /* makes sure slide fits inside box */
   display: block;
-  border-radius: 0;
   background: white;
-  object-fit: contain;
 }
 
 .page-controls {
