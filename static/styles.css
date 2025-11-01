@@ -66,32 +66,31 @@ body {
   background: transparent;
 }
 
-/* White framed slide box (centered, curved edges) */
+/* The centered white slide box */
 #pdf-wrapper {
   background: white;
   border-radius: 20px;
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
-  padding: 0;                     /* no padding to avoid cutting content */
   display: flex;
   justify-content: center;
   align-items: center;
-  max-width: 80vw;
-  max-height: calc(100vh - 60px);
-  overflow: visible;   
+  overflow: hidden;           /* keeps rounded corners */
+  width: 75vw;                /* matches your preferred proportions */
+  height: calc(100vh - 40px); /* keeps spacing from top/bottom */
+  max-width: 1200px;          /* prevents too-large scaling */
+  max-height: 90vh;           /* prevents fullscreen overflow */
 }
 
-/* PDF canvas inside the box */
+/* The PDF canvas itself */
 #pdf-canvas {
-  width: 75vw;                    /* keeps a nice centered size */
-  height: calc(100vh - 40px);
-  border-radius: 12px;            /* subtle curve on the slide */
-  max-height: 100%;
-  box-shadow: var(--shadow-lg);
-  transition: var(--transition-default);
-  object-fit: contain;            /* makes sure slide fits inside box */
   display: block;
+  width: 100%;
+  height: auto;
+  object-fit: contain;
+  border-radius: 12px;
   background: white;
 }
+
 
 .page-controls {
     position: fixed;
