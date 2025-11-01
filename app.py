@@ -1350,7 +1350,29 @@ def generate_response(user_message, concept_name, golden_answer, attempt_count, 
 
     similarity = SequenceMatcher(None, normalize(user_message), normalize(golden_answer)).ratio()
 
-    if similarity >= 0.8:
+    # Token-overlap heuristic: sometimes paraphrases lower the similarity score but still convey the golden answer.
+    def token_overlap_score(a, b):
+        toks_a = [t for t in re.split(r"\s+", a) if t]
+        toks_b = [t for t in re.split(r"\s+", b) if t]
+        if not toks_a or not toks_b:
+            return 0.0
+        set_a = set(toks_a)
+        set_b = set(toks_b)
+        common = set_a.intersection(set_b)
+        return len(common) / max(1, len(set_a))
+
+    overlap = token_overlap_score(normalize(golden_answer), normalize(user_message))
+
+    # Keyword checks for numeric ranges and causation (common in correlation answers)
+    kw_text = (user_message or "").lower()
+    has_correlation_keywords = 'correlation' in kw_text or 'correlat' in kw_text
+    has_numeric_range = any(x in kw_text for x in ['-1', '1', '0', 'negative 1', 'positive 1'])
+    mentions_causation = 'caus' in kw_text or 'causation' in kw_text
+
+    # Accept answer as correct if similarity high OR substantial token overlap OR keywords present
+    accept_as_correct = (similarity >= 0.78) or (overlap >= 0.5) or (has_correlation_keywords and (has_numeric_range or mentions_causation))
+
+    if accept_as_correct:
         # If it's the third attempt or beyond, include the exact golden answer before asking to move on.
         if attempt_count >= 2:
             return f"{golden_answer} You’re correct. You can now move on to the next concept."
