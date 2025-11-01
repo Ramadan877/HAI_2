@@ -1168,6 +1168,37 @@ def submit_message():
                 print(f"Error converting audio: {str(e)}")
                 
             user_message = speech_to_text(audio_path)
+            # Normalize transcript
+            try:
+                user_message = (user_message or "").strip()
+            except Exception:
+                user_message = user_message
+
+            # If the user accidentally recorded the AI/audio playback (common), detect it by
+            # comparing the transcript to the last AI message for this concept. If similar,
+            # treat the submission as unclear (empty) so the system asks for clarification.
+            try:
+                def _simple_norm(s):
+                    return re.sub(r'[^a-z0-9\s]', '', (s or '').lower().strip())
+
+                last_ai = None
+                hist = session.get('conversation_history', {}).get(concept_name, []) if 'conversation_history' in session else []
+                for item in reversed(hist):
+                    if isinstance(item, str) and item.startswith('AI: '):
+                        last_ai = item[4:]
+                        break
+
+                if last_ai and user_message:
+                    sim = SequenceMatcher(None, _simple_norm(user_message), _simple_norm(last_ai)).ratio()
+                    if sim >= 0.6:
+                        # Log detection and clear user_message so the AI asks for a clear explanation
+                        try:
+                            log_interaction("SYSTEM", concept_name, f"Detected possible recording of AI playback (similarity={sim:.2f}) — treating as unclear user input.")
+                        except Exception:
+                            pass
+                        user_message = ""
+            except Exception as e:
+                print('Playback-detection error:', e)
         else:
             print(f"Failed to save audio file at: {audio_path}")
             return jsonify({'error': 'Failed to save audio file'}), 500
