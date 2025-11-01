@@ -130,7 +130,6 @@ def save_recording_to_db(session_id, recording_type, file_path, original_filenam
                 except Exception as e:
                     print('Failed to schedule supabase upload task:', e)
 
-            # Always schedule a best-effort raw file upload (no metadata insert) using a safe dest path.
             try:
                 safe_participant = participant_id or 'unknown_participant'
                 safe_session = session_id or 'unknown_session'
@@ -299,9 +298,7 @@ def save_audio_with_cloud_backup(audio_data, filename, session_id, recording_typ
             with open(local_path, 'wb') as f:
                 f.write(audio_data)
         
-        # Schedule a best-effort background upload to Supabase with metadata when possible.
         try:
-            # try to resolve participant_id if not provided via session_id
             participant_id = None
             try:
                 participant_id = session.get('participant_id')
@@ -315,7 +312,6 @@ def save_audio_with_cloud_backup(audio_data, filename, session_id, recording_typ
                 except Exception:
                     participant_id = None
 
-            # Schedule metadata upload (upload_and_record_supabase) if possible
             if supabase:
                 try:
                     if 'executor' in globals() and executor:
@@ -325,7 +321,6 @@ def save_audio_with_cloud_backup(audio_data, filename, session_id, recording_typ
                 except Exception as e:
                     print('Failed to schedule upload_and_record_supabase from save_audio_with_cloud_backup:', e)
 
-            # Also always schedule a raw file upload to the storage with safe fallbacks for path components
             try:
                 safe_participant = participant_id or 'unknown_participant'
                 safe_session = session_id or 'unknown_session'
@@ -678,7 +673,12 @@ def initialize_log_file(interaction_id, participant_id, trial_type):
             file.write(f"TIMESTAMP: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             file.write("\n" + "-" * 80 + "\n\n")
         
-        app.config['CURRENT_LOG_FILE'] = log_file_path
+        # store current log file per-session to avoid cross-session overwrites
+        try:
+            session['CURRENT_LOG_FILE'] = log_file_path
+        except Exception:
+            # fallback to app config if session not available
+            app.config['CURRENT_LOG_FILE'] = log_file_path
 
         # Schedule upload of the log file to Supabase (best-effort).
         try:
@@ -706,7 +706,7 @@ def log_interaction(speaker, concept_name, text):
     """Log the interaction to the current log file with timestamp."""
     try:
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        current_log_file = app.config.get('CURRENT_LOG_FILE')
+        current_log_file = session.get('CURRENT_LOG_FILE') or app.config.get('CURRENT_LOG_FILE')
         
         if not current_log_file:
             participant_id = session.get('participant_id')
@@ -716,14 +716,23 @@ def log_interaction(speaker, concept_name, text):
                 
             interaction_id = session.get('interaction_id', get_interaction_id())
             initialize_log_file(interaction_id, participant_id, trial_type)
-            current_log_file = app.config.get('CURRENT_LOG_FILE')
+            current_log_file = session.get('CURRENT_LOG_FILE') or app.config.get('CURRENT_LOG_FILE')
         
-        with open(current_log_file, "a", encoding="utf-8") as file:
-            file.write(f"[{timestamp}] {speaker}: {text}\n\n")
-            
+        # append and ensure data is flushed to disk before scheduling uploads
+        try:
+            with open(current_log_file, "a", encoding="utf-8") as file:
+                file.write(f"[{timestamp}] {speaker}: {text}\n\n")
+                file.flush()
+                try:
+                    os.fsync(file.fileno())
+                except Exception:
+                    pass
+        except Exception as e:
+            print('Failed to write to log file:', e)
+            return False
+
         print(f"Interaction logged: {speaker} in file {current_log_file}")
 
-        # Schedule an upload of the updated log file to Supabase (best-effort)
         try:
             sess_id = session.get('session_id')
             pid = session.get('participant_id') or 'unknown_participant'
@@ -1167,6 +1176,9 @@ def submit_message():
 
     task_folder = create_user_folders(participant_id, trial_type)
     ai_response_filename = get_audio_filename('AI', participant_id, trial_type, current_attempt_count + 1)
+    # make filename unique to avoid overwriting previous AI responses for the same attempt
+    name, ext = os.path.splitext(ai_response_filename)
+    ai_response_filename = f"{name}_{uuid.uuid4().hex[:8]}{ext}"
     audio_response_path = os.path.join(task_folder, ai_response_filename)
 
     try:
@@ -1529,24 +1541,51 @@ def log_user_interaction(interaction_type, details):
     """Log various types of user interactions with the system."""
     try:
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        current_log_file = app.config.get('CURRENT_LOG_FILE')
-        
+
+        # prefer per-session log file path
+        current_log_file = session.get('CURRENT_LOG_FILE') or app.config.get('CURRENT_LOG_FILE')
+
         if not current_log_file:
             participant_id = session.get('participant_id')
             trial_type = session.get('trial_type')
             interaction_id = session.get('interaction_id', get_interaction_id())
             if participant_id and trial_type:
                 initialize_log_file(interaction_id, participant_id, trial_type)
-                current_log_file = app.config.get('CURRENT_LOG_FILE')
+                current_log_file = session.get('CURRENT_LOG_FILE') or app.config.get('CURRENT_LOG_FILE')
             else:
                 print("Warning: Cannot log user interaction, participant ID or trial type not set.")
                 return False
 
-        if current_log_file: 
-            with open(current_log_file, "a", encoding="utf-8") as file:
-                file.write(f"[{timestamp}] SYSTEM: User {interaction_type}: {details}\n\n")
-            
+        if current_log_file:
+            try:
+                with open(current_log_file, "a", encoding="utf-8") as file:
+                    file.write(f"[{timestamp}] SYSTEM: User {interaction_type}: {details}\n\n")
+                    file.flush()
+                    try:
+                        os.fsync(file.fileno())
+                    except Exception:
+                        pass
+            except Exception as e:
+                print('Failed to write user interaction to log file:', e)
+                return False
+
             print(f"User interaction logged: {interaction_type} - {details} in {current_log_file}")
+
+            # schedule upload of the updated log file
+            try:
+                sess_id = session.get('session_id')
+                pid = session.get('participant_id') or 'unknown_participant'
+                safe_dest = f"V2/{pid}/{sess_id or 'unknown_session'}/{os.path.basename(current_log_file)}"
+                if supabase:
+                    if 'executor' in globals() and executor:
+                        executor.submit(upload_and_record_supabase, current_log_file, sess_id, pid, 'V2')
+                        executor.submit(upload_file_to_supabase, current_log_file, 'V2', safe_dest)
+                    else:
+                        threading.Thread(target=upload_and_record_supabase, args=(current_log_file, sess_id, pid, 'V2'), daemon=True).start()
+                        threading.Thread(target=upload_file_to_supabase, args=(current_log_file, 'V2', safe_dest), daemon=True).start()
+            except Exception as e:
+                print('Failed to schedule log upload in log_user_interaction:', e)
+
             return True
         else:
             print("Error: No current log file path set to log user interaction.")
