@@ -218,6 +218,34 @@ def upload_and_record_supabase(local_path, session_id=None, participant_id=None,
         print('upload_and_record_supabase error:', e)
         return None
 
+
+def schedule_file_uploads(local_path, session_id=None, participant_id=None, version='V2'):
+    """Helper to schedule both raw file upload and metadata insert to Supabase.
+    This is best-effort and will use safe fallbacks for missing IDs.
+    """
+    try:
+        if not local_path or not os.path.exists(local_path):
+            return None
+
+        safe_participant = participant_id or (session.get('participant_id') if 'session' in globals() else None) or 'unknown_participant'
+        safe_session = session_id or (session.get('session_id') if 'session' in globals() else None) or 'unknown_session'
+        safe_rel = os.path.basename(local_path)
+        safe_dest = f"{version}/{safe_participant}/{safe_session}/{safe_rel}"
+
+        # schedule metadata insert + raw upload
+        if supabase:
+            try:
+                if 'executor' in globals() and executor:
+                    executor.submit(upload_and_record_supabase, local_path, safe_session if safe_session != 'unknown_session' else None, safe_participant if safe_participant != 'unknown_participant' else None, version)
+                    executor.submit(upload_file_to_supabase, local_path, version, safe_dest)
+                else:
+                    threading.Thread(target=upload_and_record_supabase, args=(local_path, safe_session if safe_session != 'unknown_session' else None, safe_participant if safe_participant != 'unknown_participant' else None, version), daemon=True).start()
+                    threading.Thread(target=upload_file_to_supabase, args=(local_path, version, safe_dest), daemon=True).start()
+            except Exception as e:
+                print('Failed to schedule uploads via schedule_file_uploads:', e)
+    except Exception as e:
+        print('schedule_file_uploads error:', e)
+
 def create_session_record(participant_id, trial_type, version):
     """Create a new session record."""
     try:
@@ -750,6 +778,11 @@ def generate_audio(text, file_path):
                 with open(file_path, 'wb') as f:
                     f.write(audio_bytes)
                 print(f"Audio file (OpenAI TTS) saved: {file_path} (content_type={content_type})")
+                # Schedule background uploads for the generated AI audio
+                try:
+                    schedule_file_uploads(file_path)
+                except Exception:
+                    pass
                 return True
         except Exception as openai_err:
             print(f"OpenAI TTS not available or failed: {openai_err}. Falling back to gTTS.")
@@ -785,6 +818,10 @@ def generate_audio(text, file_path):
 
         if os.path.exists(file_path):
             print(f"Audio file successfully saved (gTTS fallback): {file_path}")
+            try:
+                schedule_file_uploads(file_path)
+            except Exception:
+                pass
             return True
         else:
             print(f"Failed to save audio file: {file_path}")
