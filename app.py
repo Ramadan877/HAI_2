@@ -122,11 +122,11 @@ def save_recording_to_db(session_id, recording_type, file_path, original_filenam
                 try:
                     if 'executor' in globals() and executor:
                         executor.submit(
-                            lambda p=file_path, s=session_id, pid=participant_id: upload_and_record_supabase(p, s, pid, version='V2')
+                            lambda p=file_path, s=session_id, pid=participant_id, rtype=recording_type, att=attempt_number, cname=concept_name: upload_and_record_supabase(p, s, pid, version='V2', recording_type=rtype, attempt_number=att, concept_name=cname)
                         )
                     else:
                         import threading
-                        threading.Thread(target=upload_and_record_supabase, args=(file_path, session_id, participant_id, 'V2'), daemon=True).start()
+                        threading.Thread(target=upload_and_record_supabase, args=(file_path, session_id, participant_id, 'V2', recording_type, attempt_number, concept_name), daemon=True).start()
                 except Exception as e:
                     print('Failed to schedule supabase upload task:', e)
 
@@ -182,8 +182,10 @@ def upload_file_to_supabase(local_path, bucket_name='V2', dest_path=None):
         print('❌ V2 upload error:', e)
         return None, None
 
-def upload_and_record_supabase(local_path, session_id=None, participant_id=None, version='V2'):
-    """Upload file and insert metadata into `uploads` table in supabase."""
+def upload_and_record_supabase(local_path, session_id=None, participant_id=None, version='V2', recording_type=None, attempt_number=None, concept_name=None):
+    """Upload file and insert metadata into `uploads` table in supabase.
+    Accepts optional recording metadata so AI audios and other types can be recorded with context.
+    """
     try:
         if supabase is None:
             return None
@@ -199,7 +201,7 @@ def upload_and_record_supabase(local_path, session_id=None, participant_id=None,
         public_url, size = upload_file_to_supabase(local_path, bucket_name='V2', dest_path=dest_path)
         if public_url:
             try:
-                supabase.table('uploads').insert({
+                record = {
                     'session_id': session_id,
                     'participant_id': participant_id,
                     'version': version,
@@ -210,7 +212,16 @@ def upload_and_record_supabase(local_path, session_id=None, participant_id=None,
                     'file_type': None,
                     'file_size': size,
                     'metadata': {'local_path': local_path}
-                }).execute()
+                }
+                # include optional metadata fields when provided
+                if recording_type:
+                    record['recording_type'] = recording_type
+                if attempt_number is not None:
+                    record['attempt_number'] = attempt_number
+                if concept_name:
+                    record['concept_name'] = concept_name
+
+                supabase.table('uploads').insert(record).execute()
             except Exception as e:
                 print('Supabase metadata insert failed:', e)
         return public_url
@@ -219,7 +230,7 @@ def upload_and_record_supabase(local_path, session_id=None, participant_id=None,
         return None
 
 
-def schedule_file_uploads(local_path, session_id=None, participant_id=None, version='V2'):
+def schedule_file_uploads(local_path, session_id=None, participant_id=None, version='V2', recording_type=None, attempt_number=None, concept_name=None):
     """Helper to schedule both raw file upload and metadata insert to Supabase.
     This is best-effort and will use safe fallbacks for missing IDs.
     """
@@ -236,10 +247,10 @@ def schedule_file_uploads(local_path, session_id=None, participant_id=None, vers
         if supabase:
             try:
                 if 'executor' in globals() and executor:
-                    executor.submit(upload_and_record_supabase, local_path, safe_session if safe_session != 'unknown_session' else None, safe_participant if safe_participant != 'unknown_participant' else None, version)
+                    executor.submit(upload_and_record_supabase, local_path, safe_session if safe_session != 'unknown_session' else None, safe_participant if safe_participant != 'unknown_participant' else None, version, recording_type, attempt_number, concept_name)
                     executor.submit(upload_file_to_supabase, local_path, version, safe_dest)
                 else:
-                    threading.Thread(target=upload_and_record_supabase, args=(local_path, safe_session if safe_session != 'unknown_session' else None, safe_participant if safe_participant != 'unknown_participant' else None, version), daemon=True).start()
+                    threading.Thread(target=upload_and_record_supabase, args=(local_path, safe_session if safe_session != 'unknown_session' else None, safe_participant if safe_participant != 'unknown_participant' else None, version, recording_type, attempt_number, concept_name), daemon=True).start()
                     threading.Thread(target=upload_file_to_supabase, args=(local_path, version, safe_dest), daemon=True).start()
             except Exception as e:
                 print('Failed to schedule uploads via schedule_file_uploads:', e)
@@ -308,9 +319,9 @@ def save_audio_with_cloud_backup(audio_data, filename, session_id, recording_typ
             if supabase:
                 try:
                     if 'executor' in globals() and executor:
-                        executor.submit(upload_and_record_supabase, local_path, session_id, participant_id, 'V2')
+                        executor.submit(upload_and_record_supabase, local_path, session_id, participant_id, 'V2', recording_type, attempt_number, concept_name)
                     else:
-                        threading.Thread(target=upload_and_record_supabase, args=(local_path, session_id, participant_id, 'V2'), daemon=True).start()
+                        threading.Thread(target=upload_and_record_supabase, args=(local_path, session_id, participant_id, 'V2', recording_type, attempt_number, concept_name), daemon=True).start()
                 except Exception as e:
                     print('Failed to schedule upload_and_record_supabase from save_audio_with_cloud_backup:', e)
 
@@ -759,11 +770,11 @@ def change_concept():
 
     return jsonify({'status': 'success', 'message': 'Navigation and concept change logged'})
     
-def generate_audio_async(text, file_path):
-    """Generate audio asynchronously"""
-    return executor.submit(generate_audio, text, file_path)
+def generate_audio_async(text, file_path, session_id=None, participant_id=None, recording_type=None, attempt_number=None, concept_name=None):
+    """Generate audio asynchronously (for convenience) and forward metadata."""
+    return executor.submit(generate_audio, text, file_path, session_id, participant_id, recording_type, attempt_number, concept_name)
 
-def generate_audio(text, file_path):
+def generate_audio(text, file_path, session_id=None, participant_id=None, recording_type=None, attempt_number=None, concept_name=None):
     """Generate speech (audio) from the provided text.
 
     Prefer OpenAI TTS (synthesize_with_openai) and save the returned bytes to disk.
@@ -778,9 +789,9 @@ def generate_audio(text, file_path):
                 with open(file_path, 'wb') as f:
                     f.write(audio_bytes)
                 print(f"Audio file (OpenAI TTS) saved: {file_path} (content_type={content_type})")
-                # Schedule background uploads for the generated AI audio
+                # Schedule background uploads for the generated AI audio (include metadata when available)
                 try:
-                    schedule_file_uploads(file_path)
+                    schedule_file_uploads(file_path, session_id=session_id, participant_id=participant_id, version='V2', recording_type=recording_type, attempt_number=attempt_number, concept_name=concept_name)
                 except Exception:
                     pass
                 return True
@@ -819,7 +830,7 @@ def generate_audio(text, file_path):
         if os.path.exists(file_path):
             print(f"Audio file successfully saved (gTTS fallback): {file_path}")
             try:
-                schedule_file_uploads(file_path)
+                schedule_file_uploads(file_path, session_id=session_id, participant_id=participant_id, version='V2', recording_type=recording_type, attempt_number=attempt_number, concept_name=concept_name)
             except Exception:
                 pass
             return True
@@ -981,7 +992,7 @@ def get_intro_audio():
     intro_audio_path = os.path.join(app.config['INTRO_AUDIO_FOLDER'], intro_audio_filename)
 
     if not os.path.exists(intro_audio_path): 
-        generate_audio(intro_text, intro_audio_path)
+        generate_audio(intro_text, intro_audio_path, session.get('session_id'), participant_id, 'intro_audio')
         log_interaction("AI", "Introduction", intro_text)
     
     if os.path.exists(intro_audio_path):
@@ -1005,7 +1016,7 @@ def get_concept_audio(concept_name):
         if not os.path.exists(concept_audio_path) or \
            getattr(get_concept_audio, 'last_concept', None) != concept_name: 
             
-            success = generate_audio(concept_intro_text, concept_audio_path)
+            success = generate_audio(concept_intro_text, concept_audio_path, interaction_id, session.get('participant_id'), 'concept_intro', None, concept_name)
             if not success:
                 return jsonify({'error': 'Failed to generate audio'}), 500
                 
@@ -1159,7 +1170,9 @@ def submit_message():
     audio_response_path = os.path.join(task_folder, ai_response_filename)
 
     try:
-        executor.submit(generate_audio, ai_response, audio_response_path)
+        # include session/participant/metadata so the AI audio gets accurate metadata in Supabase
+        sess_id = session.get('session_id')
+        executor.submit(generate_audio, ai_response, audio_response_path, sess_id, participant_id, 'ai_audio', current_attempt_count + 1, concept_name)
     except Exception as e:
         print(f"Failed to start async audio generation: {e}")
     
