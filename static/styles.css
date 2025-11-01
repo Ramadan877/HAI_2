@@ -32,36 +32,35 @@ body {
     align-items: center;
     position: relative;
 }
+
 #pdf-container {
   display: flex;
   justify-content: center;
   align-items: center;
   height: 100vh;
   background: transparent;
-  border-radius: 20px;
-  background: rgba(26, 31, 46, 0.8);
 }
 
 /* The centered white slide box */
 #pdf-wrapper {
   background: white;
   border-radius: 20px;
-  box-shadow: 0 8px 32px rgba(0, 229, 255, 0.2);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
   display: flex;
   justify-content: center;
   align-items: center;
-  overflow: hidden;           /* keeps rounded corners */
-  width: 75vw;                /* matches your preferred proportions */
-  height: calc(100vh - 30px); /* keeps spacing from top/bottom */
-  max-width: 1200px;          /* prevents too-large scaling */
-  max-height: 90vh;           /* prevents fullscreen overflow */
+  overflow: hidden;           
+  width: 75vw;               
+  height: calc(100vh - 30px); 
+  max-width: 1200px;          
+  max-height: 90vh;          
 }
 
 /* The PDF canvas itself */
 #pdf-canvas {
   display: block;
   width: 100%;
-  height: auto;
+  height: calc(100vh - 30px); 
   object-fit: contain;
   border-radius: 12px;
   background: white;
