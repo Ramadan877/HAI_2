@@ -1455,7 +1455,7 @@ def generate_response(user_message, concept_name, golden_answer, attempt_count, 
 
     # Be tolerant for non-native accents and allow the model to attempt interpretation.
     # Only ask to repeat in English later if the AI cannot make sense of the input.
-    
+
     if is_likely_english(user_message):
         enforcement_system = "Respond only in English."
 
@@ -1495,17 +1495,16 @@ def stream_submit_message():
         concept_name = request.form.get('concept_name', '').strip()
         concepts = load_concepts()
 
-        concept_found = False
-        for concept in concepts:
-            if concept.lower() == concept_name.lower():
-                concept_name = concept
-                concept_found = True
-                break
+        selected_concept = next(
+            (c for c in concepts if c["name"].lower() == concept_name.lower()),
+            None
+        )
 
-        if not concept_found:
+        if not selected_concept:
             return jsonify({'status': 'error', 'message': 'Concept not found'}), 400
 
-        golden_answer = concepts[concept_name]['golden_answer']
+        concept_name = selected_concept["name"]  
+        golden_answer = selected_concept["golden_answer"]
 
         user_transcript = ''
         if 'audio' in request.files:
@@ -1527,7 +1526,26 @@ def stream_submit_message():
         User Explanation: {user_transcript}
         """
 
+        def is_likely_english(text):
+            if not text or not str(text).strip():
+                return False
+            txt = str(text)
+            letters = [c for c in txt if c.isalpha()]
+            if not letters:
+                return bool(re.search(r'[A-Za-z]', txt))
+            total_letters = len(letters)
+            latin_letters = sum(1 for c in letters if 'a' <= c.lower() <= 'z')
+            return (latin_letters / total_letters) >= 0.6
+
+        enforcement_system = (
+            "Respond only in English. "
+            "If the student's input is not in English, ask politely in English to repeat it in English."
+        )
+        if is_likely_english(user_transcript):
+            enforcement_system = "Respond only in English."
+
         messages = [
+            {"role": "system", "content": enforcement_system},
             {"role": "system", "content": base_prompt},
             {"role": "user", "content": user_transcript}
         ]
