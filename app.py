@@ -1455,6 +1455,9 @@ def generate_response(user_message, concept_name, golden_answer, attempt_count, 
 
     # Be tolerant for non-native accents and allow the model to attempt interpretation.
     # Only ask to repeat in English later if the AI cannot make sense of the input.
+    
+    if is_likely_english(user_message):
+        enforcement_system = "Respond only in English."
 
     messages = [
         {"role": "system", "content": enforcement_system},
