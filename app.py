@@ -1306,207 +1306,258 @@ def submit_message():
         'should_move_to_next': bool(should_move)
     })
 
+
 def generate_response(user_message, concept_name, golden_answer, attempt_count, conversation_history=None):
-    """Generate short, supportive feedback for a 3-attempt self-explanation loop."""
+    """
+    Improved tutoring logic:
+    - GPT handles correctness evaluation (no rigid similarity checks)
+    - Tutor persona is natural and adaptive
+    - Supports attempt flow
+    - Still detects filler/unclear responses
+    """
 
     import re
     import openai
 
-    if not golden_answer or not concept_name:
-        return (
-            "I can’t provide feedback yet because the concept context isn’t set. "
-            "Please make sure both the concept and golden answer are defined."
-        )
-
-    history_context = ""
-    if conversation_history and len(conversation_history) > 0:
-        history_context = "\nRecent conversation:\n" + "\n".join(conversation_history[-3:])
-
-    # === 2️⃣ Simple Similarity Check ===
-    def normalize(text):
-        return re.sub(r'[^a-z0-9\s]', '', text.lower().strip())
-
-    # quick heuristic to catch empty / filler / meaningless replies so the AI does not incorrectly praise them
+    # --- Filler / unclear detection stays (your logic kept) ---
     def is_filler(s):
         if not s or not str(s).strip():
             return True
-        s2 = str(s).strip().lower()
-        if len(s2) < 3:
-            return True
-        fillers = {'ok', 'okay', 'yes', 'no', 'mm', 'mmm', 'hmm', 'uh', 'uhh', 'fine', 'sure', 'i dont know', 'idk', 'not sure'}
+        s2 = str(s).lower().strip()
+        fillers = {'ok','okay','yes','no','mm','mmm','hmm','uh','uhh','fine','sure','i dont know','idk','not sure'}
         if s2 in fillers:
+            return True
+        if len(s2) < 3:
             return True
         if re.match(r'^[\.\,\-\s]+$', s2):
             return True
         return False
 
     if is_filler(user_message):
-        # Do not treat very short / filler responses as correct. Encourage focus, unless it's the final attempt.
         if attempt_count >= 2:
-            # On the last attempt reveal the golden answer then move on
             return f"{golden_answer} You can now move on to the next concept."
-        else:
-            return f"I couldn't understand your explanation — it was too brief or unclear. Please focus on the main idea of {concept_name} and try again."
+        return f"I couldn’t quite understand your explanation. Could you try explaining {concept_name} in full sentences?"
 
-    similarity = SequenceMatcher(None, normalize(user_message), normalize(golden_answer)).ratio()
+    # ---- Build conversation history context ----
+    history_block = ""
+    if conversation_history:
+        history_block = "\n".join(conversation_history[-6:])
 
-    # Token-overlap heuristic: sometimes paraphrases lower the similarity score but still convey the golden answer.
-    def token_overlap_score(a, b):
-        toks_a = [t for t in re.split(r"\s+", a) if t]
-        toks_b = [t for t in re.split(r"\s+", b) if t]
-        if not toks_a or not toks_b:
-            return 0.0
-        set_a = set(toks_a)
-        set_b = set(toks_b)
-        common = set_a.intersection(set_b)
-        return len(common) / max(1, len(set_a))
+    # --- Natural, tutor-style system prompt ---
+    system_prompt = f"""
+You are a friendly, intelligent tutor helping a student understand the concept '{concept_name}'.
 
-    overlap = token_overlap_score(normalize(golden_answer), normalize(user_message))
+Your behavior:
+- Speak naturally, like a real human tutor (no robotic tones).
+- Encourage the student and adapt to their level.
+- Use short, clear messages.
+- NEVER reveal the golden answer until the 3rd attempt.
+- Evaluate the student's explanation using meaning, not keywords.
+- If the student’s message is a question or off-topic, respond naturally and guide them back.
+- If the student is confused, ask a small clarifying question.
+- If their explanation is partially correct, acknowledge what's correct and give one helpful hint.
+- If fully correct, congratulate them and tell them they may move on.
+- On the 3rd attempt, if still incorrect, provide the golden answer and tell them to proceed.
 
-    # Keyword checks for numeric ranges and causation (common in correlation answers)
-    kw_text = (user_message or "").lower()
-    has_correlation_keywords = 'correlation' in kw_text or 'correlat' in kw_text
-    has_numeric_range = any(x in kw_text for x in ['-1', '1', '0', 'negative 1', 'positive 1'])
-    mentions_causation = 'caus' in kw_text or 'causation' in kw_text
+Golden Answer (not to be revealed before attempt 3):
+{golden_answer}
 
-    # Accept answer as correct if similarity high OR substantial token overlap OR keywords present
-    accept_as_correct = (similarity >= 0.78) or (overlap >= 0.5) or (has_correlation_keywords and (has_numeric_range or mentions_causation))
+Student attempt number: {attempt_count + 1}
 
-    if accept_as_correct:
-        # If it's the third attempt or beyond, include the exact golden answer before asking to move on.
-        if attempt_count >= 2:
-            return f"{golden_answer} You’re correct. You can now move on to the next concept."
-        return (
-            "Excellent — your explanation is clear and accurate. "
-            "You’ve captured the main idea correctly. "
-            "You can now move on to the next concept."
-        )
+Recent conversation:
+{history_block}
+"""
 
-    # ==== Base prompt ====
-    base_prompt = f"""
-    Context: {concept_name}
-    Golden Answer: {golden_answer}
-    Student Explanation: {user_message}
-    {history_context}
-
-    You are a concise, friendly tutor guiding a student to understand a concept.
-    The tone should be supportive, motivating, and natural — not exaggerated or lengthy.
-
-    You follow these rules:
-
-    1. **ONLY evaluate the student's message if it is clearly an attempt to explain the concept.**
-    - Explanation attempts contain definitions, descriptions, reasoning, or examples.
-    - They do NOT include questions, greetings, navigation commands (e.g., “next”, “go on”), 
-        or meta statements (“Should I start?”, “I’m done”, “Bye.”).
-
-    2. **If the student message is NOT an explanation**, do NOT evaluate it as one.
-    Instead:
-        - Answer naturally.
-        - Maintain the flow of the exercise.
-        - If necessary, remind the student to give their explanation.
-
-    3. **Never pretend that a non-explanation is an explanation.**
-    If uncertain, ask a clarifying question:
-        - “Were you explaining the concept, or asking something else?”
-
-    4. **Use the following evaluation rules ONLY for actual explanations:**
-    - Compare the explanation to the gold answer.
-    - Give short, constructive feedback.
-    - Never give the correct answer directly.
-    - Stop evaluating after 3 attempts and give a summary.
-
-    5. **If the student says they are done**, do not evaluate. Acknowledge and wait.
-
-    6. **Your tone must be friendly, natural, and adaptive to the context of the conversation.**
-
-    - Keep your feedback under 3 sentences.
-    - Be positive and instructive, not overly enthusiastic.
-    - Never reveal or restate the golden answer before the third attempt.
-    - When the student's explanation is fully correct (matches the golden answer in meaning):
-        → Clearly confirm correctness and tell them to move on to the next concept.
-    - When the explanation is partially correct:
-        → Mention briefly what is right and what is missing or unclear. Give one short hint.
-    - When the explanation is incorrect:
-        → Identify one main misunderstanding and provide one small clue to rethink it.
-    - On the third attempt:
-        → If correct, confirm and tell them to move on.
-        → If still incorrect, briefly give the correct explanation and tell them to move on.
-    - Use plain English; no emojis, lists, or unnecessary formatting.
-    """
-
-    # ==== Attempt-level instruction ====
-    if attempt_count == 0:
-        user_prompt = (
-            "This is the student's FIRST attempt. If not fully correct, provide general feedback "
-            "and one broad hint about what might be missing in the form of a question."
-        )
-    elif attempt_count == 1:
-        user_prompt = (
-            "This is the student's SECOND attempt. If still incomplete, point out the missing element "
-            "or misconception again in the form of a question but DO NOT reveal the correct answer. Encourage them for one last try."
-        )
-    elif attempt_count == 2:
-        user_prompt = (
-            "This is the student's THIRD and FINAL attempt. "
-            "If correct, confirm and tell them to move to the next concept. "
-            "If still incorrect, now briefly provide the correct explanation and guide them to move on."
-        )
-    else:
-        user_prompt = (
-            "The student has already completed three attempts. "
-            "Acknowledge their effort, give them the correct answer {golden_answer}, and tell them to move to the next concept."
-        )
-
-    enforcement_system = (
-        "Respond only in English. "
-        "If the student's input is not in English, ask politely in English to repeat it in English."
-    )
-
-    # Heuristic: check whether the message is likely English by comparing
-    # ASCII/Latin letters to total alphabetic characters. This avoids
-    # false positives when short/simple English words are used.
-    def is_likely_english(text):
-        if not text or not str(text).strip():
-            return False
-        txt = str(text)
-        # Count alphabetic characters and Latin (A-Za-z) characters
-        letters = [c for c in txt if c.isalpha()]
-        if not letters:
-            # If there are no alphabetic letters, fall back to checking for ASCII letters
-            return bool(re.search(r'[A-Za-z]', txt))
-        total_letters = len(letters)
-        latin_letters = sum(1 for c in letters if 'a' <= c.lower() <= 'z')
-        # If majority of letters are Latin, consider it English-friendly
-        return (latin_letters / total_letters) >= 0.6
-
-    # Be tolerant for non-native accents and allow the model to attempt interpretation.
-    # Only ask to repeat in English later if the AI cannot make sense of the input.
-
-    if is_likely_english(user_message):
-        enforcement_system = "Respond only in English."
-
-    messages = [
-        {"role": "system", "content": enforcement_system},
-        {"role": "system", "content": base_prompt},
-        {"role": "user", "content": user_prompt},
-    ]
+    # --- User prompt triggers the analysis ---
+    user_prompt = f"The student said: \"{user_message}\". Please respond as the tutor."
 
     try:
         response = openai.ChatCompletion.create(
             model="gpt-4o-mini",
-            messages=messages,
-            max_tokens=80,
-            temperature=0.4,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            max_tokens=120,
+            temperature=0.55
         )
-        ai_response = response.choices[0].message.content.strip()
-        return ai_response
+        return response.choices[0].message.content.strip()
 
     except Exception as e:
         return f"Error generating AI response: {str(e)}"
 
 
+# def generate_response(user_message, concept_name, golden_answer, attempt_count, conversation_history=None):
+#     """Generate short, supportive feedback for a 3-attempt self-explanation loop."""
 
-    
+#     import re
+#     import openai
+
+#     if not golden_answer or not concept_name:
+#         return (
+#             "I can’t provide feedback yet because the concept context isn’t set. "
+#             "Please make sure both the concept and golden answer are defined."
+#         )
+
+#     history_context = ""
+#     if conversation_history and len(conversation_history) > 0:
+#         history_context = "\nRecent conversation:\n" + "\n".join(conversation_history[-3:])
+
+#     # === 2️⃣ Simple Similarity Check ===
+#     def normalize(text):
+#         return re.sub(r'[^a-z0-9\s]', '', text.lower().strip())
+
+#     # quick heuristic to catch empty / filler / meaningless replies so the AI does not incorrectly praise them
+#     def is_filler(s):
+#         if not s or not str(s).strip():
+#             return True
+#         s2 = str(s).strip().lower()
+#         if len(s2) < 3:
+#             return True
+#         fillers = {'ok', 'okay', 'yes', 'no', 'mm', 'mmm', 'hmm', 'uh', 'uhh', 'fine', 'sure', 'i dont know', 'idk', 'not sure'}
+#         if s2 in fillers:
+#             return True
+#         if re.match(r'^[\.\,\-\s]+$', s2):
+#             return True
+#         return False
+
+#     if is_filler(user_message):
+#         # Do not treat very short / filler responses as correct. Encourage focus, unless it's the final attempt.
+#         if attempt_count >= 2:
+#             # On the last attempt reveal the golden answer then move on
+#             return f"{golden_answer} You can now move on to the next concept."
+#         else:
+#             return f"I couldn't understand your explanation — it was too brief or unclear. Please focus on the main idea of {concept_name} and try again."
+
+#     similarity = SequenceMatcher(None, normalize(user_message), normalize(golden_answer)).ratio()
+
+#     # Token-overlap heuristic: sometimes paraphrases lower the similarity score but still convey the golden answer.
+#     def token_overlap_score(a, b):
+#         toks_a = [t for t in re.split(r"\s+", a) if t]
+#         toks_b = [t for t in re.split(r"\s+", b) if t]
+#         if not toks_a or not toks_b:
+#             return 0.0
+#         set_a = set(toks_a)
+#         set_b = set(toks_b)
+#         common = set_a.intersection(set_b)
+#         return len(common) / max(1, len(set_a))
+
+#     overlap = token_overlap_score(normalize(golden_answer), normalize(user_message))
+
+#     # Keyword checks for numeric ranges and causation (common in correlation answers)
+#     kw_text = (user_message or "").lower()
+#     has_correlation_keywords = 'correlation' in kw_text or 'correlat' in kw_text
+#     has_numeric_range = any(x in kw_text for x in ['-1', '1', '0', 'negative 1', 'positive 1'])
+#     mentions_causation = 'caus' in kw_text or 'causation' in kw_text
+
+#     # Accept answer as correct if similarity high OR substantial token overlap OR keywords present
+#     accept_as_correct = (similarity >= 0.78) or (overlap >= 0.5) or (has_correlation_keywords and (has_numeric_range or mentions_causation))
+
+#     if accept_as_correct:
+#         # If it's the third attempt or beyond, include the exact golden answer before asking to move on.
+#         if attempt_count >= 2:
+#             return f"{golden_answer} You’re correct. You can now move on to the next concept."
+#         return (
+#             "Excellent — your explanation is clear and accurate. "
+#             "You’ve captured the main idea correctly. "
+#             "You can now move on to the next concept."
+#         )
+
+#     # ==== Base prompt ====
+#     base_prompt = f"""
+#     Context: {concept_name}
+#     Golden Answer: {golden_answer}
+#     Student Explanation: {user_message}
+#     {history_context}
+
+#     You are a concise, friendly tutor guiding a student to understand a concept.
+#     The tone should be supportive, motivating, and natural — not exaggerated or lengthy.
+#     Your task is to evaluate the student's explanation of the concept and provide feedback based on its correctness.
+#     The student has up to three attempts to explain each concept correctly.
+#     - Keep your feedback under 3 sentences.
+#     - Be positive and instructive, not overly enthusiastic.
+#     - Never reveal or restate the golden answer before the third attempt.
+#     - When the student's explanation is fully correct (matches the golden answer in meaning):
+#         → Clearly confirm correctness and tell them to move on to the next concept.
+#     - When the explanation is partially correct:
+#         → Mention briefly what is right and what is missing or unclear. Give one short hint.
+#     - When the explanation is incorrect:
+#         → Identify one main misunderstanding and provide one small clue to rethink it.
+#     - On the third attempt:
+#         → If correct, confirm and tell them to move on.
+#         → If still incorrect, briefly give the correct explanation and tell them to move on.
+#     - Use plain English; no emojis, lists, or unnecessary formatting.
+#     """
+
+#     # ==== Attempt-level instruction ====
+#     if attempt_count == 0:
+#         user_prompt = (
+#             "This is the student's FIRST attempt. If not fully correct, provide general feedback "
+#             "and one broad hint about what might be missing in the form of a question."
+#         )
+#     elif attempt_count == 1:
+#         user_prompt = (
+#             "This is the student's SECOND attempt. If still incomplete, point out the missing element "
+#             "or misconception again in the form of a question but DO NOT reveal the correct answer. Encourage them for one last try."
+#         )
+#     elif attempt_count == 2:
+#         user_prompt = (
+#             "This is the student's THIRD and FINAL attempt. "
+#             "If correct, confirm and tell them to move to the next concept. "
+#             "If still incorrect, now briefly provide the correct explanation and guide them to move on."
+#         )
+#     else:
+#         user_prompt = (
+#             "The student has already completed three attempts. "
+#             "Acknowledge their effort, give them the correct answer {golden_answer}, and tell them to move to the next concept."
+#         )
+
+#     enforcement_system = (
+#         "Respond only in English. "
+#         "If the student's input is not in English, ask politely in English to repeat it in English."
+#     )
+
+#     # Heuristic: check whether the message is likely English by comparing
+#     # ASCII/Latin letters to total alphabetic characters. This avoids
+#     # false positives when short/simple English words are used.
+#     def is_likely_english(text):
+#         if not text or not str(text).strip():
+#             return False
+#         txt = str(text)
+#         # Count alphabetic characters and Latin (A-Za-z) characters
+#         letters = [c for c in txt if c.isalpha()]
+#         if not letters:
+#             # If there are no alphabetic letters, fall back to checking for ASCII letters
+#             return bool(re.search(r'[A-Za-z]', txt))
+#         total_letters = len(letters)
+#         latin_letters = sum(1 for c in letters if 'a' <= c.lower() <= 'z')
+#         # If majority of letters are Latin, consider it English-friendly
+#         return (latin_letters / total_letters) >= 0.6
+
+#     # Be tolerant for non-native accents and allow the model to attempt interpretation.
+#     # Only ask to repeat in English later if the AI cannot make sense of the input.
+
+#     if is_likely_english(user_message):
+#         enforcement_system = "Respond only in English."
+
+#     messages = [
+#         {"role": "system", "content": enforcement_system},
+#         {"role": "system", "content": base_prompt},
+#         {"role": "user", "content": user_prompt},
+#     ]
+
+#     try:
+#         response = openai.ChatCompletion.create(
+#             model="gpt-4o-mini",
+#             messages=messages,
+#             max_tokens=80,
+#             temperature=0.4,
+#         )
+#         ai_response = response.choices[0].message.content.strip()
+#         return ai_response
+
+#     except Exception as e:
+#         return f"Error generating AI response: {str(e)}"
 
 
 @app.route('/stream_submit_message', methods=['POST'])
