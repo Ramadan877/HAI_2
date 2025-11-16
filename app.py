@@ -1309,22 +1309,38 @@ def submit_message():
 
 def generate_response(user_message, concept_name, golden_answer, attempt_count, conversation_history=None):
     """
-    Improved tutoring logic:
-    - GPT handles correctness evaluation (no rigid similarity checks)
-    - Tutor persona is natural and adaptive
-    - Supports attempt flow
-    - Still detects filler/unclear responses
+    Unified tutoring logic combining:
+    - Natural conversational tutoring (new system)
+    - Old acceptance heuristics (similarity, token overlap, keyword detection)
+    - Attempt-based control (3 attempts)
+    - Filler/unclear detection
+    - English-language enforcement
     """
 
     import re
     import openai
+    from difflib import SequenceMatcher
 
-    # --- Filler / unclear detection stays (your logic kept) ---
+    # -------------------------------------------------
+    # 0. Basic validation
+    # -------------------------------------------------
+    if not golden_answer or not concept_name:
+        return (
+            "I can’t provide feedback yet because the concept context isn’t set. "
+            "Please make sure both the concept and golden answer are defined."
+        )
+
+    # -------------------------------------------------
+    # 1. Filler / unclear message detection (KEEP OLD LOGIC)
+    # -------------------------------------------------
     def is_filler(s):
         if not s or not str(s).strip():
             return True
-        s2 = str(s).lower().strip()
-        fillers = {'ok','okay','yes','no','mm','mmm','hmm','uh','uhh','fine','sure','i dont know','idk','not sure'}
+        s2 = str(s).strip().lower()
+        fillers = {
+            'ok','okay','yes','no','mm','mmm','hmm','uh','uhh','fine','sure',
+            'i dont know','idk','not sure'
+        }
         if s2 in fillers:
             return True
         if len(s2) < 3:
@@ -1336,40 +1352,115 @@ def generate_response(user_message, concept_name, golden_answer, attempt_count, 
     if is_filler(user_message):
         if attempt_count >= 2:
             return f"{golden_answer} You can now move on to the next concept."
-        return f"I couldn’t quite understand your explanation. Could you try explaining {concept_name} in full sentences?"
+        return (
+            f"I couldn’t quite understand your explanation — it was too brief. "
+            f"Please try explaining {concept_name} in complete sentences."
+        )
 
-    # ---- Build conversation history context ----
+    # -------------------------------------------------
+    # 2. English detector (KEEP OLD LOGIC)
+    # -------------------------------------------------
+    def is_likely_english(text):
+        if not text or not str(text).strip():
+            return False
+        txt = str(text)
+        letters = [c for c in txt if c.isalpha()]
+        if not letters:
+            # fallback for numbers/punctuation
+            return bool(re.search(r'[A-Za-z]', txt))
+        total_letters = len(letters)
+        latin_letters = sum(1 for c in letters if 'a' <= c.lower() <= 'z')
+        return (latin_letters / total_letters) >= 0.6
+
+    if not is_likely_english(user_message):
+        return "Please repeat your explanation in English so I can give feedback."
+
+    # -------------------------------------------------
+    # 3. Heuristic correctness check (KEEP OLD LOGIC)
+    # -------------------------------------------------
+    def normalize(text):
+        return re.sub(r'[^a-z0-9\s]', '', text.lower().strip())
+
+    # Similarity
+    similarity = SequenceMatcher(
+        None,
+        normalize(user_message),
+        normalize(golden_answer)
+    ).ratio()
+
+    # Token overlap
+    def token_overlap(a, b):
+        toks_a = a.split()
+        toks_b = b.split()
+        if not toks_a or not toks_b:
+            return 0
+        set_a = set(toks_a)
+        set_b = set(toks_b)
+        return len(set_a & set_b) / max(1, len(set_a))
+
+    overlap = token_overlap(
+        normalize(user_message),
+        normalize(golden_answer)
+    )
+
+    # correlation keyword heuristic (special case for your concepts)
+    kw = user_message.lower()
+    has_corr = 'correlation' in kw or 'correlat' in kw
+    has_nums = any(n in kw for n in ['-1', '1', '0', 'negative', 'positive'])
+    mentions_causation = 'caus' in kw
+
+    heuristically_correct = (
+        similarity >= 0.78
+        or overlap >= 0.5
+        or (has_corr and (has_nums or mentions_causation))
+    )
+
+    # -------------------------------------------------
+    # 4. If heuristically correct BEFORE GPT → accept it
+    # -------------------------------------------------
+    if heuristically_correct:
+        if attempt_count >= 2:
+            return f"{golden_answer} You’re correct. You can now move on to the next concept."
+
+        return (
+            "Great job — your explanation captures the essential meaning. "
+            "You can move on to the next concept."
+        )
+
+    # -------------------------------------------------
+    # 5. Build conversation context for natural GPT response
+    # -------------------------------------------------
     history_block = ""
     if conversation_history:
         history_block = "\n".join(conversation_history[-6:])
 
-    # --- Natural, tutor-style system prompt ---
+    # -------------------------------------------------
+    # 6. NATURAL TUTOR SYSTEM PROMPT (NEW LOGIC)
+    # -------------------------------------------------
     system_prompt = f"""
 You are a friendly, intelligent tutor helping a student understand the concept '{concept_name}'.
+You must speak naturally — like a real human tutor.
 
-Your behavior:
-- Speak naturally, like a real human tutor (no robotic tones).
-- Encourage the student and adapt to their level.
-- Use short, clear messages.
-- NEVER reveal the golden answer until the 3rd attempt.
-- Evaluate the student's explanation using meaning, not keywords.
-- If the student’s message is a question or off-topic, respond naturally and guide them back.
-- If the student is confused, ask a small clarifying question.
-- If their explanation is partially correct, acknowledge what's correct and give one helpful hint.
-- If fully correct, congratulate them and tell them they may move on.
-- On the 3rd attempt, if still incorrect, provide the golden answer and tell them to proceed.
+RULES:
+- The student is on attempt {attempt_count + 1} of 3.
+- Never reveal the golden answer before attempt 3.
+- If the student asks a question instead of explaining, respond naturally and guide them.
+- If their explanation is partially correct, acknowledge + give one helpful hint.
+- If incorrect, gently point out the main issue and give one hint.
+- On attempt 3: if incorrect → reveal golden answer and encourage moving on.
+- Keep feedback under 3 sentences.
 
-Golden Answer (not to be revealed before attempt 3):
+Golden Answer (DO NOT reveal before attempt 3):
 {golden_answer}
 
-Student attempt number: {attempt_count + 1}
-
-Recent conversation:
+Recent Conversation:
 {history_block}
 """
 
-    # --- User prompt triggers the analysis ---
-    user_prompt = f"The student said: \"{user_message}\". Please respond as the tutor."
+    # -------------------------------------------------
+    # 7. User message fed into GPT for semantic evaluation
+    # -------------------------------------------------
+    user_prompt = f"The student said: \"{user_message}\". Respond as the tutor."
 
     try:
         response = openai.ChatCompletion.create(
@@ -1378,7 +1469,7 @@ Recent conversation:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            max_tokens=120,
+            max_tokens=150,
             temperature=0.55
         )
         return response.choices[0].message.content.strip()
