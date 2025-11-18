@@ -604,7 +604,7 @@ def get_general_audio_filename(prefix, concept_name=None, extension='.mp3'):
     return f"{name_part}{extension}"
 
 
-def synthesize_with_openai(text, voice='alloy', fmt='mp3'):
+def synthesize_with_openai(text, voice='sol', fmt='mp3'):
     api_key = os.environ.get('OPENAI_API_KEY')
     if not api_key:
         raise RuntimeError('OpenAI API key not configured')
@@ -664,26 +664,60 @@ def clean_for_tts(text):
 
 def clean_tts_text(text: str) -> str:
     """
-    Clean text before sending to Text-to-Speech.
-    Removes symbols, markdown, and formatting artifacts so TTS sounds natural.
+    Smooth TTS by reducing unnatural pauses and improving flow.
+    Designed for gTTS and OpenAI TTS.
     """
+    import re
+
     if not text:
         return ""
-    # Remove URLs
+
+    # Strip markdown, urls and formatting garbage
     text = re.sub(r'http\S+', '', text)
-    # Remove markdown & code artifacts
     text = re.sub(r'[*_#`~<>^{}\[\]|]', '', text)
-    # Replace slashes and backslashes with space (pause)
     text = re.sub(r'[\\/]', ' ', text)
-    # Remove multiple punctuation (e.g., '!!!' -> '!')
-    text = re.sub(r'([!?.,])\1+', r'\1', text)
-    # Remove stray hyphens, underscores, and symbols
-    text = re.sub(r'[-_=+]', ' ', text)
-    # Replace multiple spaces or newlines with single space
-    text = re.sub(r'\s+', ' ', text)
-    # Trim
-    text = text.strip()
+
+    # Normalize spaces
+    text = re.sub(r'\s+', ' ', text).strip()
+
+    # Reduce long punctuation pauses
+    text = text.replace("...", ".").replace("..", ".")
+
+    # Convert mid-sentence periods → commas (reduces pauses)
+    text = re.sub(r'\.\s+(?=[a-zA-Z])', ', ', text)
+
+    # Avoid double commas or weird spacing
+    text = re.sub(r',\s*,', ', ', text)
+
+    # Fix negative numbers ("-1" → "negative one")
+    text = re.sub(r'(?<!\d)-(?=\d)', 'NEGATIVE_SIGN_PLACEHOLDER', text)
+    text = re.sub(r'\b-(\d+)\b', r'negative \1', text)
+    text = text.replace("NEGATIVE_SIGN_PLACEHOLDER", " negative ")
+
+    # Ensure clean ending
+    if not text.endswith(('.', '!', '?')):
+        text += "."
+
     return text
+
+def apply_ssml_prosody(text: str) -> str:
+    """
+    Wraps tutor feedback text in SSML prosody tags for smoother, more natural speech.
+    This works for OpenAI TTS and creates better pacing and intonation.
+    """
+    import html
+
+    safe = html.escape(text)
+
+    ssml = f"""
+<speak>
+  <prosody rate="95%" pitch="+2%">
+      {safe.replace('.', '<break time="300ms"/>')}
+  </prosody>
+</speak>
+""".strip()
+
+    return ssml
 
 
 @app.route('/synthesize', methods=['POST'])
@@ -693,7 +727,7 @@ def synthesize():
         text = data.get('text') if data else None
         if not text:
             return jsonify({'error': 'No text provided'}), 400
-        voice = data.get('voice', 'alloy')
+        voice = data.get('voice', 'sol')
         fmt = data.get('format', 'mp3')
         try:
             ssml_text = ssml_wrap(text, rate='5%', pitch='0%', break_ms=220)
@@ -839,70 +873,73 @@ def generate_audio_async(text, file_path, session_id=None, participant_id=None, 
     return executor.submit(generate_audio, text, file_path, session_id, participant_id, recording_type, attempt_number, concept_name)
 
 def generate_audio(text, file_path, session_id=None, participant_id=None, recording_type=None, attempt_number=None, concept_name=None):
-    """Generate speech (audio) from the provided text.
-
-    Prefer OpenAI TTS (synthesize_with_openai) and save the returned bytes to disk.
-    If OpenAI TTS is unavailable or fails, fall back to the existing gTTS + pydub logic.
-    Returns True on success, False on failure.
+    """
+    Generate natural tutor speech:
+    - Clean text
+    - Apply SSML prosody (pitch, pacing, pauses)
+    - OpenAI TTS preferred
+    - gTTS fallback
     """
     try:
+        # 1. Clean text
+        cleaned = clean_tts_text(text or "")
+
+        # 2. Transform to SSML
+        ssml_text = apply_ssml_prosody(cleaned)
+
+        # 3. Try OpenAI TTS first
         try:
-            audio_bytes, content_type = synthesize_with_openai(text, voice='alloy', fmt='mp3')
+            audio_bytes, content_type = synthesize_with_openai(
+                ssml_text,
+                voice="sol",
+                fmt="mp3"
+            )
+
             if audio_bytes:
                 os.makedirs(os.path.dirname(file_path), exist_ok=True)
-                with open(file_path, 'wb') as f:
+                with open(file_path, "wb") as f:
                     f.write(audio_bytes)
-                print(f"Audio file (OpenAI TTS) saved: {file_path} (content_type={content_type})")
-                try:
-                    schedule_file_uploads(file_path, session_id=session_id, participant_id=participant_id, version='V2', recording_type=recording_type, attempt_number=attempt_number, concept_name=concept_name)
-                except Exception:
-                    pass
+
+                schedule_file_uploads(
+                    file_path, 
+                    session_id=session_id,
+                    participant_id=participant_id,
+                    version="V2",
+                    recording_type=recording_type,
+                    attempt_number=attempt_number,
+                    concept_name=concept_name
+                )
                 return True
-        except Exception as openai_err:
-            print(f"OpenAI TTS not available or failed: {openai_err}. Falling back to gTTS.")
 
-        sanitized_text = clean_tts_text(text)
-        if len(sanitized_text) > 500:
-            chunks = [sanitized_text[i:i+500] for i in range(0, len(sanitized_text), 500)]
-            temp_files = []
+        except Exception as e:
+            print("OpenAI TTS failed → falling back to gTTS:", e)
 
-            for i, chunk in enumerate(chunks):
-                temp_file = f"{file_path}.part{i}.mp3"
-                tts = gTTS(text=chunk, lang='en')
-                tts.save(temp_file)
-                temp_files.append(temp_file)
-
-            combined = AudioSegment.empty()
-            for temp in temp_files:
-                segment = AudioSegment.from_mp3(temp)
-                combined += segment
-
+        # 4. gTTS fallback
+        try:
+            from gtts import gTTS
+            tts = gTTS(cleaned, lang="en")
             os.makedirs(os.path.dirname(file_path), exist_ok=True)
-            combined.export(file_path, format="mp3")
-
-            for temp in temp_files:
-                try:
-                    os.remove(temp)
-                except:
-                    pass
-        else:
-            os.makedirs(os.path.dirname(file_path), exist_ok=True)
-            tts = gTTS(text=text, lang='en')
             tts.save(file_path)
 
-        if os.path.exists(file_path):
-            print(f"Audio file successfully saved (gTTS fallback): {file_path}")
-            try:
-                schedule_file_uploads(file_path, session_id=session_id, participant_id=participant_id, version='V2', recording_type=recording_type, attempt_number=attempt_number, concept_name=concept_name)
-            except Exception:
-                pass
+            schedule_file_uploads(
+                file_path, 
+                session_id=session_id,
+                participant_id=participant_id,
+                version="V2",
+                recording_type=recording_type,
+                attempt_number=attempt_number,
+                concept_name=concept_name
+            )
             return True
-        else:
-            print(f"Failed to save audio file: {file_path}")
+
+        except Exception as e:
+            print("gTTS fallback failed:", e)
             return False
+
     except Exception as e:
-        print(f"Error generating audio: {str(e)}")
+        print("generate_audio fatal error:", e)
         return False
+
 
 
 
@@ -1306,20 +1343,17 @@ def submit_message():
         'should_move_to_next': bool(should_move)
     })
 
-
 def generate_response(user_message, concept_name, golden_answer, attempt_count, conversation_history=None):
     """
     Unified tutoring logic combining:
-    - Natural conversational tutoring (new system)
-    - Old acceptance heuristics (similarity, token overlap, keyword detection)
-    - Attempt-based control (3 attempts)
-    - Filler/unclear detection
-    - English-language enforcement
+    - V2 pipeline structure (filler → English check → heuristics → GPT)
+    - V1 interaction design (no fake praise, confusion handling, natural tone)
+    - Semantic similarity (OpenAI embeddings)
     """
 
     import re
     import openai
-    from difflib import SequenceMatcher
+    import numpy as np
 
     # -------------------------------------------------
     # 0. Basic validation
@@ -1331,7 +1365,7 @@ def generate_response(user_message, concept_name, golden_answer, attempt_count, 
         )
 
     # -------------------------------------------------
-    # 1. Filler / unclear message detection (KEEP OLD LOGIC)
+    # 1. Filler / unclear message detection (KEEP V1 LOGIC)
     # -------------------------------------------------
     def is_filler(s):
         if not s or not str(s).strip():
@@ -1354,11 +1388,11 @@ def generate_response(user_message, concept_name, golden_answer, attempt_count, 
             return f"{golden_answer} You can now move on to the next concept."
         return (
             f"I couldn’t quite understand your explanation — it was too brief. "
-            f"Please try explaining {concept_name} in complete sentences."
+            f"Try explaining {concept_name} in your own words using full sentences."
         )
 
     # -------------------------------------------------
-    # 2. English detector (KEEP OLD LOGIC)
+    # 2. English detection
     # -------------------------------------------------
     def is_likely_english(text):
         if not text or not str(text).strip():
@@ -1366,104 +1400,131 @@ def generate_response(user_message, concept_name, golden_answer, attempt_count, 
         txt = str(text)
         letters = [c for c in txt if c.isalpha()]
         if not letters:
-            # fallback for numbers/punctuation
             return bool(re.search(r'[A-Za-z]', txt))
         total_letters = len(letters)
-        latin_letters = sum(1 for c in letters if 'a' <= c.lower() <= 'z')
-        return (latin_letters / total_letters) >= 0.6
+        latin = sum(1 for c in letters if 'a' <= c.lower() <= 'z')
+        return (latin / total_letters) >= 0.6
 
     if not is_likely_english(user_message):
         return "Please repeat your explanation in English so I can give feedback."
 
     # -------------------------------------------------
-    # 3. Heuristic correctness check (KEEP OLD LOGIC)
+    # 3. SEMANTIC SIMILARITY via embeddings
     # -------------------------------------------------
-    def normalize(text):
-        return re.sub(r'[^a-z0-9\s]', '', text.lower().strip())
+    def semantic_similarity(a: str, b: str) -> float:
+        try:
+            emb = openai.embeddings.create(
+                model="text-embedding-3-small",
+                input=[a, b]
+            )
+            e1 = np.array(emb.data[0].embedding)
+            e2 = np.array(emb.data[1].embedding)
+            cos_sim = np.dot(e1, e2) / (np.linalg.norm(e1) * np.linalg.norm(e2))
+            return float(max(0, min(1, cos_sim)))
+        except Exception as e:
+            print("Embedding error:", e)
+            return 0.0
 
-    # Similarity
-    similarity = SequenceMatcher(
-        None,
-        normalize(user_message),
-        normalize(golden_answer)
-    ).ratio()
+    sim = semantic_similarity(user_message, golden_answer)
 
-    # Token overlap
-    def token_overlap(a, b):
-        toks_a = a.split()
-        toks_b = b.split()
-        if not toks_a or not toks_b:
-            return 0
-        set_a = set(toks_a)
-        set_b = set(toks_b)
-        return len(set_a & set_b) / max(1, len(set_a))
-
-    overlap = token_overlap(
-        normalize(user_message),
-        normalize(golden_answer)
-    )
-
-    # correlation keyword heuristic (special case for your concepts)
-    kw = user_message.lower()
-    has_corr = 'correlation' in kw or 'correlat' in kw
-    has_nums = any(n in kw for n in ['-1', '1', '0', 'negative', 'positive'])
-    mentions_causation = 'caus' in kw
-
-    heuristically_correct = (
-        similarity >= 0.78
-        or overlap >= 0.5
-        or (has_corr and (has_nums or mentions_causation))
-    )
+    if sim >= 0.80:
+        similarity_bucket = "high"
+    elif sim >= 0.55:
+        similarity_bucket = "medium"
+    elif sim >= 0.35:
+        similarity_bucket = "low"
+    else:
+        similarity_bucket = "very_low"
 
     # -------------------------------------------------
-    # 4. If heuristically correct BEFORE GPT → accept it
+    # 4. Early acceptance (ONLY if clearly correct)
     # -------------------------------------------------
-    if heuristically_correct:
+    if sim >= 0.88:
         if attempt_count >= 2:
             return f"{golden_answer} You’re correct. You can now move on to the next concept."
-
-        return (
-            "Great job — your explanation captures the essential meaning. "
-            "You can move on to the next concept."
-        )
+        return "Nice explanation — you’ve captured the essential idea. You can move on to the next concept."
 
     # -------------------------------------------------
-    # 5. Build conversation context for natural GPT response
+    # 5. Conversation history block
     # -------------------------------------------------
     history_block = ""
     if conversation_history:
         history_block = "\n".join(conversation_history[-6:])
 
     # -------------------------------------------------
-    # 6. NATURAL TUTOR SYSTEM PROMPT (NEW LOGIC)
+    # 6. NATURAL TUTOR SYSTEM PROMPT (V2 + V1 MERGED)
     # -------------------------------------------------
     system_prompt = f"""
-You are a friendly, intelligent tutor helping a student understand the concept '{concept_name}'.
-You must speak naturally — like a real human tutor.
+You are a friendly, intelligent tutor guiding a student through the concept "{concept_name}"
+as part of a self-explanation learning activity.
 
-RULES:
-- The student is on attempt {attempt_count + 1} of 3.
-- Never reveal the golden answer before attempt 3.
-- If the student asks a question instead of explaining, respond naturally and guide them.
-- If their explanation is partially correct, acknowledge + give one helpful hint.
-- If incorrect, gently point out the main issue and give one hint.
-- On attempt 3: if incorrect → reveal golden answer and encourage moving on.
-- Keep feedback under 3 sentences.
+You must ALWAYS respond naturally — like a human tutor — NOT like a scripted rule engine.
+
+Follow this interaction model strictly:
+
+1. CLASSIFY THE STUDENT'S MESSAGE INTERNALLY (do NOT say the label):
+   - A genuine attempt to explain the concept,
+   - A sign of confusion (“I don't get it”, “I don’t know what to do”),
+   - A procedural/meta question (“should I explain this?”, “what do I do?”),
+   - Off-topic or unrelated content.
+
+2. GENERAL BEHAVIOR:
+   - Respond in warm, plain English.
+   - Use no more than 3 short sentences.
+   - Never give generic praise when the answer is clearly wrong or very low similarity.
+   - If similarity_bucket = "very_low", treat it as incorrect.
+   - Never say “you’re on the right track” unless the meaning is truly close.
+
+3. ATTEMPT LOGIC:
+   Attempt {attempt_count + 1} of 3.
+   - Attempt 1:
+       If incorrect → gently say it doesn't describe the concept and give ONE broad guiding hint.
+       If partially correct → acknowledge what’s right and point out one missing piece.
+   - Attempt 2:
+       Give clearer guidance but DO NOT reveal the golden answer.
+       Correct ONE key misunderstanding.
+       Ask ONE focused question.
+   - Attempt 3:
+       If correct → confirm and tell them to move to the next concept.
+       If still incorrect → give a brief 1–2 sentence explanation of the concept (paraphrased),
+         then tell them to move to the next concept.
+
+4. CONFUSION:
+   If the student shows confusion:
+       - Normalize their confusion (“It’s okay if this feels unclear.”)
+       - Provide a simple way to start (“Try describing what changes when X changes.”)
+       - Ask ONE guiding question.
+
+5. META QUESTIONS:
+   If the student asks what to do:
+       - Briefly remind them that they should explain the concept in their own words.
+       - Invite them to begin (“You can start by describing…”).
+
+6. OFF-TOPIC ANSWERS:
+   If the answer is unrelated:
+       - Say clearly but kindly that it doesn’t define the concept.
+       - Give ONE sentence about the kind of idea the concept involves.
+       - Ask them to try again with that focus.
 
 Golden Answer (DO NOT reveal before attempt 3):
 {golden_answer}
 
-Recent Conversation:
-{history_block}
+Similarity bucket: {similarity_bucket}
+
+Recent conversation:
+{history_block if history_block else "(no prior turns)"}
+
+Your response must be a natural-sounding tutor reply,
+following the above rules, no more than 3 short sentences.
 """
 
     # -------------------------------------------------
-    # 7. User message fed into GPT for semantic evaluation
+    # 7. GPT response generation
     # -------------------------------------------------
-    user_prompt = f"The student said: \"{user_message}\". Respond as the tutor."
+    user_prompt = f'The student said: "{user_message}". Respond as the tutor.'
 
     try:
-        response = openai.ChatCompletion.create(
+        result = openai.ChatCompletion.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -1472,7 +1533,7 @@ Recent Conversation:
             max_tokens=150,
             temperature=0.55
         )
-        return response.choices[0].message.content.strip()
+        return result.choices[0].message.content.strip()
 
     except Exception as e:
         return f"Error generating AI response: {str(e)}"
