@@ -52,6 +52,73 @@ import uuid
 
 load_dotenv()
 
+# Optional Supabase client (used for cloud storage of audio files)
+try:
+    from supabase import create_client as create_supabase_client
+except Exception:
+    create_supabase_client = None
+
+supabase_client = None
+SUPABASE_BUCKET = os.environ.get('SUPABASE_BUCKET', 'uploads')
+
+def init_supabase():
+    """Initialize a Supabase client if SUPABASE_URL and SUPABASE keys are present."""
+    global supabase_client
+    if supabase_client is not None:
+        return supabase_client
+
+    url = os.environ.get('SUPABASE_URL')
+    key = os.environ.get('SUPABASE_SERVICE_ROLE_KEY') or os.environ.get('SUPABASE_KEY') or os.environ.get('SUPABASE_ANON_KEY')
+    if not url or not key or create_supabase_client is None:
+        supabase_client = None
+        return None
+
+    try:
+        supabase_client = create_supabase_client(url, key)
+        return supabase_client
+    except Exception as e:
+        print(f"Failed to initialize Supabase client: {e}")
+        supabase_client = None
+        return None
+
+def upload_file_to_supabase(local_path, dest_path=None, content_type=None):
+    """Upload a local file to Supabase storage. Returns dict with keys 'path' and 'public_url' on success, else None."""
+    try:
+        client = init_supabase()
+        if not client:
+            return None
+
+        bucket = os.environ.get('SUPABASE_BUCKET', SUPABASE_BUCKET)
+        dest = dest_path or os.path.basename(local_path)
+
+        # Read bytes
+        with open(local_path, 'rb') as f:
+            data = f.read()
+
+        # Try upload - supabase client API may accept bytes
+        try:
+            res = client.storage.from_(bucket).upload(dest, data)
+        except TypeError:
+            # Fallback: some versions expect a file-like object
+            with open(local_path, 'rb') as fh:
+                res = client.storage.from_(bucket).upload(dest, fh)
+
+        public_url = None
+        try:
+            url_res = client.storage.from_(bucket).get_public_url(dest)
+            # support multiple key names depending on supabase-py version
+            if isinstance(url_res, dict):
+                public_url = url_res.get('public_url') or url_res.get('publicURL') or url_res.get('publicUrl')
+            elif hasattr(url_res, 'public_url'):
+                public_url = url_res.public_url
+        except Exception:
+            public_url = None
+
+        return {'path': dest, 'public_url': public_url, 'raw': res}
+    except Exception as e:
+        print(f"Supabase upload failed: {e}")
+        return None
+
 
 def save_interaction_to_db(session_id, speaker, concept_name, message, attempt_number=1):
     """Save interaction to database."""
@@ -137,17 +204,65 @@ def create_session_record(participant_id, trial_type, version):
 
 
 def save_audio_with_cloud_backup(audio_data, filename, session_id, recording_type, concept_name=None, attempt_number=None):
-    """Save audio locally."""
+    """Save audio locally, upload to Supabase (if configured), and record metadata in DB.
+
+    Returns tuple (local_path, supabase_result_dict_or_None)
+    """
     try:
         local_path = os.path.join(UPLOAD_FOLDER, filename)
-        
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+
         if hasattr(audio_data, 'save'):
             audio_data.save(local_path)
         else:
             with open(local_path, 'wb') as f:
                 f.write(audio_data)
-        
-        return local_path, None
+
+        file_size = None
+        try:
+            file_size = os.path.getsize(local_path)
+        except Exception:
+            file_size = None
+
+        supabase_result = None
+        try:
+            # attempt to upload to supabase under a session-specific path to avoid collisions
+            dest = os.path.join(str(session_id or ''), filename).replace('\\', '/')
+            supabase_result = upload_file_to_supabase(local_path, dest_path=dest)
+        except Exception as e:
+            print(f"Supabase upload attempt failed: {e}")
+
+        # If supabase upload succeeded, prefer storing the public_url (if present) in DB
+        db_file_path = None
+        if supabase_result and supabase_result.get('public_url'):
+            db_file_path = supabase_result.get('public_url')
+        elif supabase_result and supabase_result.get('path'):
+            db_file_path = f"{os.environ.get('SUPABASE_URL','')}/storage/v1/object/public/{os.environ.get('SUPABASE_BUCKET', SUPABASE_BUCKET)}/{supabase_result.get('path')}"
+        else:
+            # fallback to local relative path
+            # store path relative to USER_DATA_BASE_FOLDER where appropriate
+            try:
+                rel = os.path.relpath(local_path, USER_DATA_BASE_FOLDER)
+            except Exception:
+                rel = local_path
+            db_file_path = rel
+
+        # Save metadata to DB (if configured)
+        try:
+            if session_id and os.environ.get('DATABASE_URL'):
+                save_recording_to_db(
+                    session_id=session_id,
+                    recording_type=recording_type,
+                    file_path=db_file_path,
+                    original_filename=filename,
+                    file_size=file_size,
+                    concept_name=concept_name,
+                    attempt_number=attempt_number
+                )
+        except Exception as e:
+            print(f"Failed to save recording metadata to DB: {e}")
+
+        return local_path, supabase_result
     except Exception as e:
         print(f"Error in save_audio_with_cloud_backup: {str(e)}")
         return None, None
