@@ -872,73 +872,65 @@ def generate_audio_async(text, file_path, session_id=None, participant_id=None, 
     """Generate audio asynchronously (for convenience) and forward metadata."""
     return executor.submit(generate_audio, text, file_path, session_id, participant_id, recording_type, attempt_number, concept_name)
 
-def generate_audio(text, file_path, session_id=None, participant_id=None, recording_type=None, attempt_number=None, concept_name=None):
+def generate_audio(text, output_path):
     """
     Generate natural tutor speech:
-    - Clean text
-    - Apply SSML prosody (pitch, pacing, pauses)
-    - OpenAI TTS preferred
-    - gTTS fallback
+    - Adds a hyped / energetic speaking style
+    - Uses OpenAI TTS with SSML/voice tuning
+    - Falls back to gTTS if needed
     """
+
+    import openai
+    from gtts import gTTS
+    import os
+
+    # -----------------------------
+    # 1. Clean text for TTS
+    # -----------------------------
+    cleaned = clean_tts_text(text)
+
+    # -----------------------------
+    # 2. HYPED STYLE WRAPPER
+    # -----------------------------
+    hyped_text = (
+        "Speak in an enthusiastic, upbeat, energetic tone full of positivity, "
+        "like a very excited friendly tutor. Now say this:\n" + cleaned
+    )
+
+    # SSML prosody (smooths pacing)
+    ssml_text = apply_ssml_prosody(hyped_text)
+
     try:
-        # 1. Clean text
-        cleaned = clean_tts_text(text or "")
+        # -----------------------------
+        # 3. OpenAI TTS 
+        # -----------------------------
+        response = openai.audio.speech.create(
+            model="gpt-4o-mini-tts",
+            voice="sol",          
+            input=ssml_text,
+            format="mp3"
+        )
+        audio_bytes = response.read()
 
-        # 2. Transform to SSML
-        ssml_text = apply_ssml_prosody(cleaned)
-
-        # 3. Try OpenAI TTS first
-        try:
-            audio_bytes, content_type = synthesize_with_openai(
-                ssml_text,
-                voice="sol",
-                fmt="mp3"
-            )
-
-            if audio_bytes:
-                os.makedirs(os.path.dirname(file_path), exist_ok=True)
-                with open(file_path, "wb") as f:
-                    f.write(audio_bytes)
-
-                schedule_file_uploads(
-                    file_path, 
-                    session_id=session_id,
-                    participant_id=participant_id,
-                    version="V2",
-                    recording_type=recording_type,
-                    attempt_number=attempt_number,
-                    concept_name=concept_name
-                )
-                return True
-
-        except Exception as e:
-            print("OpenAI TTS failed → falling back to gTTS:", e)
-
-        # 4. gTTS fallback
-        try:
-            from gtts import gTTS
-            tts = gTTS(cleaned, lang="en")
-            os.makedirs(os.path.dirname(file_path), exist_ok=True)
-            tts.save(file_path)
-
-            schedule_file_uploads(
-                file_path, 
-                session_id=session_id,
-                participant_id=participant_id,
-                version="V2",
-                recording_type=recording_type,
-                attempt_number=attempt_number,
-                concept_name=concept_name
-            )
-            return True
-
-        except Exception as e:
-            print("gTTS fallback failed:", e)
-            return False
+        with open(output_path, "wb") as f:
+            f.write(audio_bytes)
+        return True
 
     except Exception as e:
-        print("generate_audio fatal error:", e)
-        return False
+        print("OpenAI TTS failed, falling back to gTTS:", e)
+
+        try:
+            # -----------------------------
+            # 4. Fallback gTTS (less hype)
+            # -----------------------------
+            tts = gTTS(cleaned, lang="en", slow=False)
+            tts.save(output_path)
+            return True
+
+        except Exception as e2:
+            print("gTTS also failed:", e2)
+            return False
+
 
 
 
