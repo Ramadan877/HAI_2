@@ -43,7 +43,6 @@ import logging
 import re
 import gc
 import threading
-import time
 from functools import lru_cache
 from functools import wraps
 from concurrent.futures import ThreadPoolExecutor
@@ -52,19 +51,6 @@ from database import db, Participant, Session, Interaction, Recording, UserEvent
 import uuid
 
 load_dotenv()
-
-from supabase import create_client
-import traceback
-
-# Supabase configuration
-SUPABASE_URL = os.environ.get('SUPABASE_URL')
-SUPABASE_KEY = os.environ.get('SUPABASE_KEY') or os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
-supabase = None
-if SUPABASE_URL and SUPABASE_KEY:
-    try:
-        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-    except Exception as e:
-        print('Warning: could not initialize Supabase client:', e)
 
 
 def save_interaction_to_db(session_id, speaker, concept_name, message, attempt_number=1):
@@ -110,43 +96,6 @@ def save_recording_to_db(session_id, recording_type, file_path, original_filenam
         )
         db.session.add(recording)
         db.session.commit()
-        # schedule a non-blocking upload to Supabase (best-effort)
-        try:
-            participant_id = None
-            try:
-                sess = Session.query.filter_by(session_id=session_id).first()
-                participant_id = sess.participant_id if sess else None
-            except Exception:
-                participant_id = None
-
-            if supabase:
-                try:
-                    if 'executor' in globals() and executor:
-                        executor.submit(
-                            lambda p=file_path, s=session_id, pid=participant_id, rtype=recording_type, att=attempt_number, cname=concept_name: upload_and_record_supabase(p, s, pid, version='V2', recording_type=rtype, attempt_number=att, concept_name=cname)
-                        )
-                    else:
-                        import threading
-                        threading.Thread(target=upload_and_record_supabase, args=(file_path, session_id, participant_id, 'V2', recording_type, attempt_number, concept_name), daemon=True).start()
-                except Exception as e:
-                    print('Failed to schedule supabase upload task:', e)
-
-            try:
-                safe_participant = participant_id or 'unknown_participant'
-                safe_session = session_id or 'unknown_session'
-                safe_rel = os.path.basename(file_path)
-                safe_dest = f"V2/{safe_participant}/{safe_session}/{safe_rel}"
-
-                if 'executor' in globals() and executor:
-                    executor.submit(upload_file_to_supabase, file_path, 'V2', safe_dest)
-                else:
-                    import threading
-                    threading.Thread(target=upload_file_to_supabase, args=(file_path, 'V2', safe_dest), daemon=True).start()
-            except Exception as e:
-                print('Failed to schedule raw supabase upload task:', e)
-        except Exception:
-            pass
-
         return recording.id
     except Exception as e:
         print(f"Error saving recording: {str(e)}")
@@ -155,150 +104,6 @@ def save_recording_to_db(session_id, recording_type, file_path, original_filenam
         except:
             pass
         return None
-
-
-def upload_file_to_supabase(local_path, bucket_name='V2', dest_path=None):
-    """Upload a local file to Supabase storage and return (public_url, size).
-    This matches the V1 implementation: best-effort, does not raise to caller
-    if Supabase is not configured. The caller is expected to provide the correct
-    local_path (absolute or relative to the app runtime).
-    """
-    if supabase is None:
-        return None, None
-    if not dest_path:
-        dest_path = os.path.basename(local_path)
-
-    try:
-        with open(local_path, 'rb') as f:
-            data = f.read()
-
-        storage = supabase.storage.from_(bucket_name)
-        # Attempt to remove existing object first to ensure we overwrite the stored file.
-        try:
-            storage.remove([dest_path])
-        except Exception:
-            # ignore removal errors (object may not exist or remove not supported)
-            pass
-
-        storage.upload(dest_path, data)
-
-        public_url = f"{SUPABASE_URL}/storage/v1/object/public/{bucket_name}/{dest_path}"
-        size = os.path.getsize(local_path)
-        return public_url, size
-    except Exception as e:
-        print('❌ V2 upload error:', e)
-        return None, None
-
-def upload_and_record_supabase(local_path, session_id=None, participant_id=None, version='V2', recording_type=None, attempt_number=None, concept_name=None):
-    """Upload file and insert metadata into `uploads` table in supabase.
-    Accepts optional recording metadata so AI audios and other types can be recorded with context.
-    """
-    try:
-        if supabase is None:
-            return None
-        if not os.path.exists(local_path):
-            return None
-
-        # dest path namespaced by version/participant/session
-        safe_rel = os.path.basename(local_path)
-        participant_part = participant_id if participant_id else 'unknown'
-        sess_part = session_id if session_id else 'no_session'
-        dest_path = f"{version}/{participant_part}/{sess_part}/{safe_rel}"
-
-        public_url, size = upload_file_to_supabase(local_path, bucket_name='V2', dest_path=dest_path)
-        if public_url:
-            try:
-                record = {
-                    'session_id': session_id,
-                    'participant_id': participant_id,
-                    'version': version,
-                    'bucket': 'V2',
-                    'path': dest_path,
-                    'public_url': public_url,
-                    'file_name': safe_rel,
-                    'file_type': None,
-                    'file_size': size,
-                    'metadata': {'local_path': local_path}
-                }
-                # include optional metadata fields when provided
-                if recording_type:
-                    record['recording_type'] = recording_type
-                if attempt_number is not None:
-                    record['attempt_number'] = attempt_number
-                if concept_name:
-                    record['concept_name'] = concept_name
-
-                supabase.table('uploads').insert(record).execute()
-            except Exception as e:
-                print('Supabase metadata insert failed:', e)
-        return public_url
-    except Exception as e:
-        print('upload_and_record_supabase error:', e)
-        return None
-
-
-def schedule_file_uploads(local_path, session_id=None, participant_id=None, version='V2', recording_type=None, attempt_number=None, concept_name=None):
-    """Helper to schedule both raw file upload and metadata insert to Supabase.
-    This is best-effort and will use safe fallbacks for missing IDs.
-    """
-    try:
-        if not local_path or not os.path.exists(local_path):
-            return None
-
-        safe_participant = participant_id or (session.get('participant_id') if 'session' in globals() else None) or 'unknown_participant'
-        safe_session = session_id or (session.get('session_id') if 'session' in globals() else None) or 'unknown_session'
-        safe_rel = os.path.basename(local_path)
-        safe_dest = f"{version}/{safe_participant}/{safe_session}/{safe_rel}"
-
-        # schedule metadata insert + raw upload after a short delay to allow any in-progress writes to finish
-        if supabase:
-            try:
-                def _delayed_upload(p, s, pid, ver, rtype, att, cname, dest, mtime_at_schedule, delay=1.5):
-                    try:
-                        time.sleep(delay)
-                        # wait until file's mtime stabilizes to reduce race with writes
-                        try:
-                            tries = 0
-                            while True:
-                                try:
-                                    current_mtime = os.path.getmtime(p)
-                                except Exception:
-                                    current_mtime = None
-                                if current_mtime is None:
-                                    break
-                                if current_mtime == mtime_at_schedule:
-                                    break
-                                # update observed mtime and wait a short time for more changes
-                                mtime_at_schedule = current_mtime
-                                time.sleep(0.5)
-                                tries += 1
-                                if tries >= 6:
-                                    break
-                        except Exception:
-                            pass
-
-                        # call upload_and_record_supabase which uploads file and inserts metadata
-                        upload_and_record_supabase(p, s, pid, version=ver, recording_type=rtype, attempt_number=att, concept_name=cname)
-                        # ensure raw upload is present as well (upload_and_record_supabase already does this, but keep as safe)
-                        try:
-                            upload_file_to_supabase(p, ver, dest)
-                        except Exception:
-                            pass
-                    except Exception as e:
-                        print('Delayed upload failed:', e)
-
-                try:
-                    mtime = os.path.getmtime(local_path)
-                except Exception:
-                    mtime = None
-                if 'executor' in globals() and executor:
-                    executor.submit(_delayed_upload, local_path, safe_session if safe_session != 'unknown_session' else None, safe_participant if safe_participant != 'unknown_participant' else None, version, recording_type, attempt_number, concept_name, safe_dest, mtime)
-                else:
-                    threading.Thread(target=_delayed_upload, args=(local_path, safe_session if safe_session != 'unknown_session' else None, safe_participant if safe_participant != 'unknown_participant' else None, version, recording_type, attempt_number, concept_name, safe_dest, mtime), daemon=True).start()
-            except Exception as e:
-                print('Failed to schedule uploads via schedule_file_uploads:', e)
-    except Exception as e:
-        print('schedule_file_uploads error:', e)
 
 def create_session_record(participant_id, trial_type, version):
     """Create a new session record."""
@@ -342,45 +147,6 @@ def save_audio_with_cloud_backup(audio_data, filename, session_id, recording_typ
             with open(local_path, 'wb') as f:
                 f.write(audio_data)
         
-        try:
-            participant_id = None
-            try:
-                participant_id = session.get('participant_id')
-            except Exception:
-                participant_id = None
-
-            if not participant_id and session_id:
-                try:
-                    sess = Session.query.filter_by(session_id=session_id).first()
-                    participant_id = sess.participant_id if sess else None
-                except Exception:
-                    participant_id = None
-
-            if supabase:
-                try:
-                    if 'executor' in globals() and executor:
-                        executor.submit(upload_and_record_supabase, local_path, session_id, participant_id, 'V2', recording_type, attempt_number, concept_name)
-                    else:
-                        threading.Thread(target=upload_and_record_supabase, args=(local_path, session_id, participant_id, 'V2', recording_type, attempt_number, concept_name), daemon=True).start()
-                except Exception as e:
-                    print('Failed to schedule upload_and_record_supabase from save_audio_with_cloud_backup:', e)
-
-            try:
-                safe_participant = participant_id or 'unknown_participant'
-                safe_session = session_id or 'unknown_session'
-                safe_rel = os.path.basename(local_path)
-                safe_dest = f"V2/{safe_participant}/{safe_session}/{safe_rel}"
-
-                if 'executor' in globals() and executor:
-                    executor.submit(upload_file_to_supabase, local_path, 'V2', safe_dest)
-                else:
-                    threading.Thread(target=upload_file_to_supabase, args=(local_path, 'V2', safe_dest), daemon=True).start()
-            except Exception as e:
-                print('Failed to schedule raw upload_file_to_supabase from save_audio_with_cloud_backup:', e)
-
-        except Exception as e:
-            print('Error scheduling cloud backup upload:', e)
-
         return local_path, None
     except Exception as e:
         print(f"Error in save_audio_with_cloud_backup: {str(e)}")
@@ -457,10 +223,6 @@ app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY')
 app.secret_key = os.environ.get('SECRET_KEY', 'fallback-secret-key')
 
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB limit for long recordings
-
-SUPABASE_DATABASE_URL = os.environ.get('SUPABASE_DATABASE_URL')
-if SUPABASE_DATABASE_URL:
-    app.config['SUPABASE_DATABASE_URL'] = SUPABASE_DATABASE_URL
 
 db.init_app(app)
 
@@ -604,7 +366,7 @@ def get_general_audio_filename(prefix, concept_name=None, extension='.mp3'):
     return f"{name_part}{extension}"
 
 
-def synthesize_with_openai(text, voice='sol', fmt='mp3'):
+def synthesize_with_openai(text, voice='alloy', fmt='mp3'):
     api_key = os.environ.get('OPENAI_API_KEY')
     if not api_key:
         raise RuntimeError('OpenAI API key not configured')
@@ -662,64 +424,6 @@ def clean_for_tts(text):
         return text
 
 
-def clean_tts_text(text: str) -> str:
-    """
-    Smooth TTS by reducing unnatural pauses and improving flow.
-    Designed for gTTS and OpenAI TTS.
-    """
-    import re
-
-    if not text:
-        return ""
-
-    # Strip markdown, urls and formatting garbage
-    text = re.sub(r'http\S+', '', text)
-    text = re.sub(r'[*_#`~<>^{}\[\]|]', '', text)
-    text = re.sub(r'[\\/]', ' ', text)
-
-    # Normalize spaces
-    text = re.sub(r'\s+', ' ', text).strip()
-
-    # Reduce long punctuation pauses
-    text = text.replace("...", ".").replace("..", ".")
-
-    # Convert mid-sentence periods → commas (reduces pauses)
-    text = re.sub(r'\.\s+(?=[a-zA-Z])', ', ', text)
-
-    # Avoid double commas or weird spacing
-    text = re.sub(r',\s*,', ', ', text)
-
-    # Fix negative numbers ("-1" → "negative one")
-    text = re.sub(r'(?<!\d)-(?=\d)', 'NEGATIVE_SIGN_PLACEHOLDER', text)
-    text = re.sub(r'\b-(\d+)\b', r'negative \1', text)
-    text = text.replace("NEGATIVE_SIGN_PLACEHOLDER", " negative ")
-
-    # Ensure clean ending
-    if not text.endswith(('.', '!', '?')):
-        text += "."
-
-    return text
-
-def apply_ssml_prosody(text: str) -> str:
-    """
-    Wraps tutor feedback text in SSML prosody tags for smoother, more natural speech.
-    This works for OpenAI TTS and creates better pacing and intonation.
-    """
-    import html
-
-    safe = html.escape(text)
-
-    ssml = f"""
-<speak>
-  <prosody rate="95%" pitch="+2%">
-      {safe.replace('.', '<break time="300ms"/>')}
-  </prosody>
-</speak>
-""".strip()
-
-    return ssml
-
-
 @app.route('/synthesize', methods=['POST'])
 def synthesize():
     try:
@@ -727,7 +431,7 @@ def synthesize():
         text = data.get('text') if data else None
         if not text:
             return jsonify({'error': 'No text provided'}), 400
-        voice = data.get('voice', 'sol')
+        voice = data.get('voice', 'alloy')
         fmt = data.get('format', 'mp3')
         try:
             ssml_text = ssml_wrap(text, rate='5%', pitch='0%', break_ms=220)
@@ -738,7 +442,7 @@ def synthesize():
         try:
             from io import BytesIO
             bio = BytesIO()
-            cleaned_for_tts = clean_tts_text(ssml_text) or clean_tts_text(text)
+            cleaned_for_tts = clean_for_tts(ssml_text) or clean_for_tts(text)
             tts = gTTS(text=cleaned_for_tts, lang='en')
             tts.write_to_fp(bio)
             bio.seek(0)
@@ -775,23 +479,7 @@ def initialize_log_file(interaction_id, participant_id, trial_type):
             file.write(f"TIMESTAMP: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             file.write("\n" + "-" * 80 + "\n\n")
         
-        try:
-            session['CURRENT_LOG_FILE'] = log_file_path
-        except Exception:
-            app.config['CURRENT_LOG_FILE'] = log_file_path
-
-        # Schedule upload of the log file to Supabase (best-effort).
-        try:
-            sess_id = session.get('session_id')
-            pid = participant_id or session.get('participant_id') or 'unknown_participant'
-            if supabase:
-                try:
-                    schedule_file_uploads(log_file_path, session_id=sess_id, participant_id=pid, version='V2', recording_type='conversation_log')
-                except Exception as e:
-                    print('Failed to schedule log file upload via schedule_file_uploads:', e)
-        except Exception as e:
-            print('Failed to schedule log file upload:', e)
-
+        app.config['CURRENT_LOG_FILE'] = log_file_path
         return True
     except Exception as e:
         print(f"Error initializing log file: {str(e)}")
@@ -801,7 +489,7 @@ def log_interaction(speaker, concept_name, text):
     """Log the interaction to the current log file with timestamp."""
     try:
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        current_log_file = session.get('CURRENT_LOG_FILE') or app.config.get('CURRENT_LOG_FILE')
+        current_log_file = app.config.get('CURRENT_LOG_FILE')
         
         if not current_log_file:
             participant_id = session.get('participant_id')
@@ -811,32 +499,12 @@ def log_interaction(speaker, concept_name, text):
                 
             interaction_id = session.get('interaction_id', get_interaction_id())
             initialize_log_file(interaction_id, participant_id, trial_type)
-            current_log_file = session.get('CURRENT_LOG_FILE') or app.config.get('CURRENT_LOG_FILE')
+            current_log_file = app.config.get('CURRENT_LOG_FILE')
         
-        try:
-            with open(current_log_file, "a", encoding="utf-8") as file:
-                file.write(f"[{timestamp}] {speaker}: {text}\n\n")
-                file.flush()
-                try:
-                    os.fsync(file.fileno())
-                except Exception:
-                    pass
-        except Exception as e:
-            print('Failed to write to log file:', e)
-            return False
-
+        with open(current_log_file, "a", encoding="utf-8") as file:
+            file.write(f"[{timestamp}] {speaker}: {text}\n\n")
+            
         print(f"Interaction logged: {speaker} in file {current_log_file}")
-
-        try:
-            sess_id = session.get('session_id')
-            pid = session.get('participant_id') or 'unknown_participant'
-            if supabase:
-                try:
-                    schedule_file_uploads(current_log_file, session_id=sess_id, participant_id=pid, version='V2', recording_type='conversation_log')
-                except Exception as e:
-                    print('Failed to schedule log upload after append via schedule_file_uploads:', e)
-        except Exception as e:
-            print('Failed to schedule log upload after append:', e)
         return True
     except Exception as e:
         print(f"Error logging interaction: {str(e)}")
@@ -868,70 +536,67 @@ def change_concept():
 
     return jsonify({'status': 'success', 'message': 'Navigation and concept change logged'})
     
-def generate_audio_async(text, file_path, session_id=None, participant_id=None, recording_type=None, attempt_number=None, concept_name=None):
-    """Generate audio asynchronously (for convenience) and forward metadata."""
-    return executor.submit(generate_audio, text, file_path, session_id, participant_id, recording_type, attempt_number, concept_name)
+def generate_audio_async(text, file_path):
+    """Generate audio asynchronously"""
+    return executor.submit(generate_audio, text, file_path)
 
-def generate_audio(text, output_path):
+def generate_audio(text, file_path):
+    """Generate speech (audio) from the provided text.
+
+    Prefer OpenAI TTS (synthesize_with_openai) and save the returned bytes to disk.
+    If OpenAI TTS is unavailable or fails, fall back to the existing gTTS + pydub logic.
+    Returns True on success, False on failure.
     """
-    Generate natural tutor speech:
-    - Adds a hyped / energetic speaking style
-    - Uses OpenAI TTS with SSML/voice tuning
-    - Falls back to gTTS if needed
-    """
-
-    import openai
-    from gtts import gTTS
-    import os
-
-    # -----------------------------
-    # 1. Clean text for TTS
-    # -----------------------------
-    cleaned = clean_tts_text(text)
-
-    # -----------------------------
-    # 2. HYPED STYLE WRAPPER
-    # -----------------------------
-    hyped_text = (
-        "Speak in an enthusiastic, upbeat, energetic tone full of positivity, "
-        "like a very excited friendly tutor. Now say this:\n" + cleaned
-    )
-
-    # SSML prosody (smooths pacing)
-    ssml_text = apply_ssml_prosody(hyped_text)
-
     try:
-        # -----------------------------
-        # 3. OpenAI TTS 
-        # -----------------------------
-        response = openai.audio.speech.create(
-            model="gpt-4o-mini-tts",
-            voice="sol",          
-            input=ssml_text,
-            format="mp3"
-        )
-        audio_bytes = response.read()
-
-        with open(output_path, "wb") as f:
-            f.write(audio_bytes)
-        return True
-
-    except Exception as e:
-        print("OpenAI TTS failed, falling back to gTTS:", e)
-
         try:
-            # -----------------------------
-            # 4. Fallback gTTS (less hype)
-            # -----------------------------
-            tts = gTTS(cleaned, lang="en", slow=False)
-            tts.save(output_path)
+            audio_bytes, content_type = synthesize_with_openai(text, voice='alloy', fmt='mp3')
+            if audio_bytes:
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                with open(file_path, 'wb') as f:
+                    f.write(audio_bytes)
+                print(f"Audio file (OpenAI TTS) saved: {file_path} (content_type={content_type})")
+                return True
+        except Exception as openai_err:
+            print(f"OpenAI TTS not available or failed: {openai_err}. Falling back to gTTS.")
+
+        sanitized_text = clean_for_tts(text)
+        if len(sanitized_text) > 500:
+            chunks = [sanitized_text[i:i+500] for i in range(0, len(sanitized_text), 500)]
+            temp_files = []
+
+            for i, chunk in enumerate(chunks):
+                temp_file = f"{file_path}.part{i}.mp3"
+                tts = gTTS(text=chunk, lang='en')
+                tts.save(temp_file)
+                temp_files.append(temp_file)
+
+            combined = AudioSegment.empty()
+            for temp in temp_files:
+                segment = AudioSegment.from_mp3(temp)
+                combined += segment
+
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            combined.export(file_path, format="mp3")
+
+            for temp in temp_files:
+                try:
+                    os.remove(temp)
+                except:
+                    pass
+        else:
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            tts = gTTS(text=text, lang='en')
+            tts.save(file_path)
+
+        if os.path.exists(file_path):
+            print(f"Audio file successfully saved (gTTS fallback): {file_path}")
             return True
-
-        except Exception as e2:
-            print("gTTS also failed:", e2)
+        else:
+            print(f"Failed to save audio file: {file_path}")
             return False
-
-
+    except Exception as e:
+        print(f"Error generating audio: {str(e)}")
+        return False
 
 
 
@@ -1084,7 +749,7 @@ def get_intro_audio():
     intro_audio_path = os.path.join(app.config['INTRO_AUDIO_FOLDER'], intro_audio_filename)
 
     if not os.path.exists(intro_audio_path): 
-        generate_audio(intro_text, intro_audio_path, session.get('session_id'), participant_id, 'intro_audio')
+        generate_audio(intro_text, intro_audio_path)
         log_interaction("AI", "Introduction", intro_text)
     
     if os.path.exists(intro_audio_path):
@@ -1108,7 +773,7 @@ def get_concept_audio(concept_name):
         if not os.path.exists(concept_audio_path) or \
            getattr(get_concept_audio, 'last_concept', None) != concept_name: 
             
-            success = generate_audio(concept_intro_text, concept_audio_path, interaction_id, session.get('participant_id'), 'concept_intro', None, concept_name)
+            success = generate_audio(concept_intro_text, concept_audio_path)
             if not success:
                 return jsonify({'error': 'Failed to generate audio'}), 500
                 
@@ -1197,37 +862,6 @@ def submit_message():
                 print(f"Error converting audio: {str(e)}")
                 
             user_message = speech_to_text(audio_path)
-            # Normalize transcript
-            try:
-                user_message = (user_message or "").strip()
-            except Exception:
-                user_message = user_message
-
-            # If the user accidentally recorded the AI/audio playback (common), detect it by
-            # comparing the transcript to the last AI message for this concept. If similar,
-            # treat the submission as unclear (empty) so the system asks for clarification.
-            try:
-                def _simple_norm(s):
-                    return re.sub(r'[^a-z0-9\s]', '', (s or '').lower().strip())
-
-                last_ai = None
-                hist = session.get('conversation_history', {}).get(concept_name, []) if 'conversation_history' in session else []
-                for item in reversed(hist):
-                    if isinstance(item, str) and item.startswith('AI: '):
-                        last_ai = item[4:]
-                        break
-
-                if last_ai and user_message:
-                    sim = SequenceMatcher(None, _simple_norm(user_message), _simple_norm(last_ai)).ratio()
-                    if sim >= 0.6:
-                        # Log detection and clear user_message so the AI asks for a clear explanation
-                        try:
-                            log_interaction("SYSTEM", concept_name, f"Detected possible recording of AI playback (similarity={sim:.2f}) — treating as unclear user input.")
-                        except Exception:
-                            pass
-                        user_message = ""
-            except Exception as e:
-                print('Playback-detection error:', e)
         else:
             print(f"Failed to save audio file at: {audio_path}")
             return jsonify({'error': 'Failed to save audio file'}), 500
@@ -1290,14 +924,10 @@ def submit_message():
 
     task_folder = create_user_folders(participant_id, trial_type)
     ai_response_filename = get_audio_filename('AI', participant_id, trial_type, current_attempt_count + 1)
-    name, ext = os.path.splitext(ai_response_filename)
-    ai_response_filename = f"{name}_{uuid.uuid4().hex[:8]}{ext}"
     audio_response_path = os.path.join(task_folder, ai_response_filename)
 
     try:
-        # include session/participant/metadata so the AI audio gets accurate metadata in Supabase
-        sess_id = session.get('session_id')
-        executor.submit(generate_audio, ai_response, audio_response_path, sess_id, participant_id, 'ai_audio', current_attempt_count + 1, concept_name)
+        executor.submit(generate_audio, ai_response, audio_response_path)
     except Exception as e:
         print(f"Failed to start async audio generation: {e}")
     
@@ -1336,197 +966,140 @@ def submit_message():
     })
 
 def generate_response(user_message, concept_name, golden_answer, attempt_count, conversation_history=None):
-    """
-    Unified tutoring logic combining:
-    - V2 pipeline structure (filler → English check → heuristics → GPT)
-    - V1 interaction design (no fake praise, confusion handling, natural tone)
-    - Semantic similarity (OpenAI embeddings)
-    """
+    """Generate short, supportive feedback for a 3-attempt self-explanation loop."""
 
     import re
     import openai
-    import numpy as np
 
-    # -------------------------------------------------
-    # 0. Basic validation
-    # -------------------------------------------------
     if not golden_answer or not concept_name:
         return (
             "I can’t provide feedback yet because the concept context isn’t set. "
             "Please make sure both the concept and golden answer are defined."
         )
 
-    # -------------------------------------------------
-    # 1. Filler / unclear message detection (KEEP V1 LOGIC)
-    # -------------------------------------------------
-    def is_filler(s):
-        if not s or not str(s).strip():
-            return True
-        s2 = str(s).strip().lower()
-        fillers = {
-            'ok','okay','yes','no','mm','mmm','hmm','uh','uhh','fine','sure',
-            'i dont know','idk','not sure'
-        }
-        if s2 in fillers:
-            return True
-        if len(s2) < 3:
-            return True
-        if re.match(r'^[\.\,\-\s]+$', s2):
-            return True
-        return False
+    history_context = ""
+    if conversation_history and len(conversation_history) > 0:
+        history_context = "\nRecent conversation:\n" + "\n".join(conversation_history[-3:])
 
-    if is_filler(user_message):
-        if attempt_count >= 2:
-            return f"{golden_answer} You can now move on to the next concept."
+    # === 2️⃣ Simple Similarity Check ===
+    def normalize(text):
+        return re.sub(r'[^a-z0-9\s]', '', text.lower().strip())
+
+    similarity = SequenceMatcher(None, normalize(user_message), normalize(golden_answer)).ratio()
+
+    if similarity >= 0.8:
         return (
-            f"I couldn’t quite understand your explanation — it was too brief. "
-            f"Try explaining {concept_name} in your own words using full sentences."
+            "Excellent — your explanation is clear and accurate. "
+            "You’ve captured the main idea correctly. "
+            "You can now move on to the next concept."
         )
 
-    # -------------------------------------------------
-    # 2. English detection
-    # -------------------------------------------------
-    def is_likely_english(text):
-        if not text or not str(text).strip():
-            return False
-        txt = str(text)
-        letters = [c for c in txt if c.isalpha()]
-        if not letters:
-            return bool(re.search(r'[A-Za-z]', txt))
-        total_letters = len(letters)
-        latin = sum(1 for c in letters if 'a' <= c.lower() <= 'z')
-        return (latin / total_letters) >= 0.6
+    # ==== Base prompt ====
+    base_prompt = f"""
+    Context: {concept_name}
+    Golden Answer: {golden_answer}
+    Student Explanation: {user_message}
+    {history_context}
 
-    if not is_likely_english(user_message):
-        return "Please repeat your explanation in English so I can give feedback."
+    You are a concise, friendly tutor guiding a student to understand a concept.
+    The tone should be supportive, motivating, and natural — not exaggerated or lengthy.
 
-    # -------------------------------------------------
-    # 3. SEMANTIC SIMILARITY via embeddings
-    # -------------------------------------------------
-    def semantic_similarity(a: str, b: str) -> float:
-        try:
-            emb = openai.embeddings.create(
-                model="text-embedding-3-small",
-                input=[a, b]
-            )
-            e1 = np.array(emb.data[0].embedding)
-            e2 = np.array(emb.data[1].embedding)
-            cos_sim = np.dot(e1, e2) / (np.linalg.norm(e1) * np.linalg.norm(e2))
-            return float(max(0, min(1, cos_sim)))
-        except Exception as e:
-            print("Embedding error:", e)
-            return 0.0
+    Rules:
+    - Keep your feedback under 3 sentences.
+    - Be positive and instructive, not overly enthusiastic.
+    - Never reveal or restate the golden answer before the third attempt.
+    - When the student's explanation is fully correct (matches the golden answer in meaning):
+        → Clearly confirm correctness and tell them to move on to the next concept.
+    - When the explanation is partially correct:
+        → Mention briefly what is right and what is missing or unclear. Give one short hint.
+    - When the explanation is incorrect:
+        → Identify one main misunderstanding and provide one small clue to rethink it.
+    - On the third attempt:
+        → If correct, confirm and tell them to move on.
+        → If still incorrect, briefly give the correct explanation and tell them to move on.
+    - Use plain English; no emojis, lists, or unnecessary formatting.
+    """
 
-    sim = semantic_similarity(user_message, golden_answer)
-
-    if sim >= 0.80:
-        similarity_bucket = "high"
-    elif sim >= 0.55:
-        similarity_bucket = "medium"
-    elif sim >= 0.35:
-        similarity_bucket = "low"
+    # ==== Attempt-level instruction ====
+    if attempt_count == 0:
+        user_prompt = (
+            "This is the student's FIRST attempt. If not fully correct, provide general feedback "
+            "and one broad hint about what might be missing in the form of a question."
+        )
+    elif attempt_count == 1:
+        user_prompt = (
+            "This is the student's SECOND attempt. If still incomplete, point out the missing element "
+            "or misconception again in the form of a question but DO NOT reveal the correct answer. Encourage them for one last try."
+        )
+    elif attempt_count == 2:
+        user_prompt = (
+            "This is the student's THIRD and FINAL attempt. "
+            "If correct, confirm and tell them to move to the next concept. "
+            "If still incorrect, now briefly provide the correct explanation and guide them to move on."
+        )
     else:
-        similarity_bucket = "very_low"
+        user_prompt = (
+            "The student has already completed three attempts. "
+            "Acknowledge their effort and tell them to move to the next concept."
+        )
 
-    # -------------------------------------------------
-    # 4. Early acceptance (ONLY if clearly correct)
-    # -------------------------------------------------
-    if sim >= 0.88:
-        if attempt_count >= 2:
-            return f"{golden_answer} You’re correct. You can now move on to the next concept."
-        return "Nice explanation — you’ve captured the essential idea. You can move on to the next concept."
+    enforcement_system = (
+        "Respond only in English. "
+        "If the student's input is not in English, ask politely in English to repeat it in English."
+    )
 
-    # -------------------------------------------------
-    # 5. Conversation history block
-    # -------------------------------------------------
-    history_block = ""
-    if conversation_history:
-        history_block = "\n".join(conversation_history[-6:])
+    non_english = re.compile(r"[\u0590-\u05FF\u0600-\u06FF\u0400-\u04FF\u0900-\u097F\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF]")
+    if non_english.search(user_message):
+        return "Please repeat your explanation in English so I can provide feedback."
 
-    # -------------------------------------------------
-    # 6. NATURAL TUTOR SYSTEM PROMPT (V2 + V1 MERGED)
-    # -------------------------------------------------
-    system_prompt = f"""
-You are a friendly, intelligent tutor guiding a student through the concept "{concept_name}"
-as part of a self-explanation learning activity.
-
-You must ALWAYS respond naturally — like a human tutor — NOT like a scripted rule engine.
-
-Follow this interaction model strictly:
-
-1. CLASSIFY THE STUDENT'S MESSAGE INTERNALLY (do NOT say the label):
-   - A genuine attempt to explain the concept,
-   - A sign of confusion (“I don't get it”, “I don’t know what to do”),
-   - A procedural/meta question (“should I explain this?”, “what do I do?”),
-   - Off-topic or unrelated content.
-
-2. GENERAL BEHAVIOR:
-   - Respond in warm, plain English.
-   - Use no more than 3 short sentences.
-   - Never give generic praise when the answer is clearly wrong or very low similarity.
-   - If similarity_bucket = "very_low", treat it as incorrect.
-   - Never say “you’re on the right track” unless the meaning is truly close.
-
-3. ATTEMPT LOGIC:
-   Attempt {attempt_count + 1} of 3.
-   - Attempt 1:
-       If incorrect → gently say it doesn't describe the concept and give ONE broad guiding hint.
-       If partially correct → acknowledge what’s right and point out one missing piece.
-   - Attempt 2:
-       Give clearer guidance but DO NOT reveal the golden answer.
-       Correct ONE key misunderstanding.
-       Ask ONE focused question.
-   - Attempt 3:
-       If correct → confirm and tell them to move to the next concept.
-       If still incorrect → give a brief 1–2 sentence explanation of the concept (paraphrased),
-         then tell them to move to the next concept.
-
-4. CONFUSION:
-   If the student shows confusion:
-       - Normalize their confusion (“It’s okay if this feels unclear.”)
-       - Provide a simple way to start (“Try describing what changes when X changes.”)
-       - Ask ONE guiding question.
-
-5. META QUESTIONS:
-   If the student asks what to do:
-       - Briefly remind them that they should explain the concept in their own words.
-       - Invite them to begin (“You can start by describing…”).
-
-6. OFF-TOPIC ANSWERS:
-   If the answer is unrelated:
-       - Say clearly but kindly that it doesn’t define the concept.
-       - Give ONE sentence about the kind of idea the concept involves.
-       - Ask them to try again with that focus.
-
-Golden Answer (DO NOT reveal before attempt 3):
-{golden_answer}
-
-Similarity bucket: {similarity_bucket}
-
-Recent conversation:
-{history_block if history_block else "(no prior turns)"}
-
-Your response must be a natural-sounding tutor reply,
-following the above rules, no more than 3 short sentences.
-"""
-
-    # -------------------------------------------------
-    # 7. GPT response generation
-    # -------------------------------------------------
-    user_prompt = f'The student said: "{user_message}". Respond as the tutor.'
+    messages = [
+        {"role": "system", "content": enforcement_system},
+        {"role": "system", "content": base_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
 
     try:
-        result = openai.ChatCompletion.create(
+        response = openai.ChatCompletion.create(
             model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            max_tokens=150,
-            temperature=0.55
+            messages=messages,
+            max_tokens=80,
+            temperature=0.4,
         )
-        return result.choices[0].message.content.strip()
+        ai_response = response.choices[0].message.content.strip()
+        return ai_response
 
+    except Exception as e:
+        return f"Error generating AI response: {str(e)}"
+
+
+
+    def detect_non_english(text):
+        if not text:
+            return False
+        non_latin_regex = re.compile(r"[\u0590-\u05FF\u0600-\u06FF\u0400-\u04FF\u0900-\u097F\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF]")
+        return bool(non_latin_regex.search(text))
+
+    if detect_non_english(user_message):
+        return "Please repeat your explanation in English so I can provide feedback. This interaction uses English only."
+
+    try:
+        messages = [
+            {"role": "system", "content": enforcement_system},
+            {"role": "system", "content": base_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+
+        response = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            max_tokens=80,
+            temperature=0.4,
+        )
+
+        ai_response = response.choices[0].message.content
+        attempt_count += 1
+        session['attempt_count'] = attempt_count
+        return ai_response
     except Exception as e:
         return f"Error generating AI response: {str(e)}"
 
@@ -1543,16 +1116,17 @@ def stream_submit_message():
         concept_name = request.form.get('concept_name', '').strip()
         concepts = load_concepts()
 
-        selected_concept = next(
-            (c for c in concepts if c["name"].lower() == concept_name.lower()),
-            None
-        )
+        concept_found = False
+        for concept in concepts:
+            if concept.lower() == concept_name.lower():
+                concept_name = concept
+                concept_found = True
+                break
 
-        if not selected_concept:
+        if not concept_found:
             return jsonify({'status': 'error', 'message': 'Concept not found'}), 400
 
-        concept_name = selected_concept["name"]  
-        golden_answer = selected_concept["golden_answer"]
+        golden_answer = concepts[concept_name]['golden_answer']
 
         user_transcript = ''
         if 'audio' in request.files:
@@ -1574,26 +1148,7 @@ def stream_submit_message():
         User Explanation: {user_transcript}
         """
 
-        def is_likely_english(text):
-            if not text or not str(text).strip():
-                return False
-            txt = str(text)
-            letters = [c for c in txt if c.isalpha()]
-            if not letters:
-                return bool(re.search(r'[A-Za-z]', txt))
-            total_letters = len(letters)
-            latin_letters = sum(1 for c in letters if 'a' <= c.lower() <= 'z')
-            return (latin_letters / total_letters) >= 0.6
-
-        enforcement_system = (
-            "Respond only in English. "
-            "If the student's input is not in English, ask politely in English to repeat it in English."
-        )
-        if is_likely_english(user_transcript):
-            enforcement_system = "Respond only in English."
-
         messages = [
-            {"role": "system", "content": enforcement_system},
             {"role": "system", "content": base_prompt},
             {"role": "user", "content": user_transcript}
         ]
@@ -1729,48 +1284,24 @@ def log_user_interaction(interaction_type, details):
     """Log various types of user interactions with the system."""
     try:
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
-        # prefer per-session log file path
-        current_log_file = session.get('CURRENT_LOG_FILE') or app.config.get('CURRENT_LOG_FILE')
-
+        current_log_file = app.config.get('CURRENT_LOG_FILE')
+        
         if not current_log_file:
             participant_id = session.get('participant_id')
             trial_type = session.get('trial_type')
             interaction_id = session.get('interaction_id', get_interaction_id())
             if participant_id and trial_type:
                 initialize_log_file(interaction_id, participant_id, trial_type)
-                current_log_file = session.get('CURRENT_LOG_FILE') or app.config.get('CURRENT_LOG_FILE')
+                current_log_file = app.config.get('CURRENT_LOG_FILE')
             else:
                 print("Warning: Cannot log user interaction, participant ID or trial type not set.")
                 return False
 
-        if current_log_file:
-            try:
-                with open(current_log_file, "a", encoding="utf-8") as file:
-                    file.write(f"[{timestamp}] SYSTEM: User {interaction_type}: {details}\n\n")
-                    file.flush()
-                    try:
-                        os.fsync(file.fileno())
-                    except Exception:
-                        pass
-            except Exception as e:
-                print('Failed to write user interaction to log file:', e)
-                return False
-
+        if current_log_file: 
+            with open(current_log_file, "a", encoding="utf-8") as file:
+                file.write(f"[{timestamp}] SYSTEM: User {interaction_type}: {details}\n\n")
+            
             print(f"User interaction logged: {interaction_type} - {details} in {current_log_file}")
-
-            # schedule upload of the updated log file
-            try:
-                sess_id = session.get('session_id')
-                pid = session.get('participant_id') or 'unknown_participant'
-                if supabase:
-                    try:
-                        schedule_file_uploads(current_log_file, session_id=sess_id, participant_id=pid, version='V2', recording_type='conversation_log')
-                    except Exception as e:
-                        print('Failed to schedule log upload in log_user_interaction via schedule_file_uploads:', e)
-            except Exception as e:
-                print('Failed to schedule log upload in log_user_interaction:', e)
-
             return True
         else:
             print("Error: No current log file path set to log user interaction.")
@@ -2123,47 +1654,6 @@ def diagnostic_filesystem():
         }), 500
 
 
-@app.route('/finalize_session', methods=['POST'])
-def finalize_session_v2():
-    """Called from client on unload to upload remaining files for a participant/session to Supabase."""
-    try:
-        data = request.get_json(silent=True) or {}
-        participant_id = data.get('participant_id') or session.get('participant_id')
-        session_id = data.get('session_id') or session.get('session_id')
-        version = data.get('version') or 'V2'
-
-        if not participant_id:
-            return jsonify({'status':'error','message':'missing participant_id'}), 400
-
-        participant_folder = os.path.normpath(os.path.join(USER_DATA_BASE_FOLDER, str(participant_id)))
-
-        uploaded = []
-        if os.path.exists(participant_folder):
-            for root, _, files in os.walk(participant_folder):
-                for fname in files:
-                    if fname.startswith('.'):
-                        continue
-                    local_path = os.path.join(root, fname)
-                    try:
-                        if 'executor' in globals() and executor:
-                            executor.submit(lambda p=local_path, s=session_id, pid=participant_id: upload_and_record_supabase(p, s, pid, version=version))
-                        else:
-                            threading.Thread(target=upload_and_record_supabase, args=(local_path, session_id, participant_id, version), daemon=True).start()
-                        uploaded.append(local_path)
-                    except Exception as e:
-                        print('finalize_session_v2 scheduling failed for', local_path, e)
-
-        return jsonify({'status':'ok','scheduled':len(uploaded)}), 200
-    except Exception as e:
-        print('finalize_session_v2 error:', e)
-        return jsonify({'status':'error','message':str(e)}), 500
-
-
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5001))
     app.run(host='0.0.0.0', port=port, debug=False)
-
-
-
-
-
