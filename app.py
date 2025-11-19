@@ -91,22 +91,18 @@ def upload_file_to_supabase(local_path, dest_path=None, content_type=None):
         bucket = os.environ.get('SUPABASE_BUCKET', SUPABASE_BUCKET)
         dest = dest_path or os.path.basename(local_path)
 
-        # Read bytes
         with open(local_path, 'rb') as f:
             data = f.read()
 
-        # Try upload - supabase client API may accept bytes
         try:
             res = client.storage.from_(bucket).upload(dest, data)
         except TypeError:
-            # Fallback: some versions expect a file-like object
             with open(local_path, 'rb') as fh:
                 res = client.storage.from_(bucket).upload(dest, fh)
 
         public_url = None
         try:
             url_res = client.storage.from_(bucket).get_public_url(dest)
-            # support multiple key names depending on supabase-py version
             if isinstance(url_res, dict):
                 public_url = url_res.get('public_url') or url_res.get('publicURL') or url_res.get('publicUrl')
             elif hasattr(url_res, 'public_url'):
@@ -114,6 +110,10 @@ def upload_file_to_supabase(local_path, dest_path=None, content_type=None):
         except Exception:
             public_url = None
 
+        try:
+            print(f"Supabase upload successful: bucket={bucket} dest={dest} public_url={public_url}")
+        except Exception:
+            pass
         return {'path': dest, 'public_url': public_url, 'raw': res}
     except Exception as e:
         print(f"Supabase upload failed: {e}")
@@ -1116,23 +1116,39 @@ def generate_response(user_message, concept_name, golden_answer, attempt_count, 
     Student Explanation: {user_message}
     {history_context}
 
-    You are a concise, friendly tutor guiding a student to understand a concept.
-    The tone should be supportive, motivating, and natural — not exaggerated or lengthy.
+    You are a concise, friendly tutor guiding the student to self-explain a concept.
+    The tone should be warm, motivating, and professional — not overly enthusiastic or verbose.
 
-    Rules:
-    - Keep your feedback under 3 sentences.
-    - Be positive and instructive, not overly enthusiastic.
-    - Never reveal or restate the golden answer before the third attempt.
-    - When the student's explanation is fully correct (matches the golden answer in meaning):
-        → Clearly confirm correctness and tell them to move on to the next concept.
-    - When the explanation is partially correct:
-        → Mention briefly what is right and what is missing or unclear. Give one short hint.
-    - When the explanation is incorrect:
-        → Identify one main misunderstanding and provide one small clue to rethink it.
-    - On the third attempt:
-        → If correct, confirm and tell them to move on.
-        → If still incorrect, briefly give the correct explanation and tell them to move on.
-    - Use plain English; no emojis, lists, or unnecessary formatting.
+    Your goals:
+    1. Understand what the student actually said. This includes:
+    - A real attempt at explanation
+    - A question about the concept or about the task
+    - Confusion or misunderstanding
+    - Being off-topic
+    2. Respond naturally and appropriately:
+    - If the student asks a question: answer briefly, then guide them back to explaining in their own words.
+    - If the student is confused: clarify the misunderstanding, then prompt them to explain again.
+    - If they go off-topic: gently redirect them to the concept.
+    3. For explanation attempts: evaluate correctness and respond **according to attempt number**:
+    - Attempt 1: Give very general guidance or a hint. No revealing the answer.
+    - Attempt 2: Point out the missing element more clearly. No revealing the answer.
+    - Attempt 3: 
+        If correct → confirm and tell them to move on.
+        If incorrect → provide the correct golden answer and tell them to move on.
+    4. Your tone should always be:
+    - Natural, human-like
+    - Brief (max 2 short sentences)
+    - Supportive but not overly enthusiastic
+    - Never robotic or templated
+    5. Never fabricate that the student "mentioned X" unless they actually did.  
+    Use their real wording authentically.
+
+    Guidelines:
+    - Keep responses to AT MOST 2 short sentences.
+    - Aim for 25–40 words maximum in total.
+    - Acknowledge correct parts briefly; do not overpraise.
+    - Never reveal the golden answer before the third attempt.
+    - Use plain English, no emojis, no lists, no unnecessary filler.
     """
 
     # ==== Attempt-level instruction ====
@@ -1150,7 +1166,7 @@ def generate_response(user_message, concept_name, golden_answer, attempt_count, 
         user_prompt = (
             "This is the student's THIRD and FINAL attempt. "
             "If correct, confirm and tell them to move to the next concept. "
-            "If still incorrect, now briefly provide the correct explanation and guide them to move on."
+            "If still incorrect, now briefly provide the correct explanation (Golden Answer) and guide them to move on."
         )
     else:
         user_prompt = (
@@ -1263,9 +1279,21 @@ def stream_submit_message():
         User Explanation: {user_transcript}
         """
 
+        enforcement_system = (
+            "Respond only in English. "
+            "If the student's input is not in English, ask politely in English to repeat it in English."
+        )
+
+        length_rule = (
+            "IMPORTANT: Your entire response must be at most 2 short sentences "
+            "and no more than 40 words in total. Do not exceed this length."
+        )
+        
         messages = [
             {"role": "system", "content": base_prompt},
-            {"role": "user", "content": user_transcript}
+            {"role": "user", "content": user_transcript},
+            {"role": "system", "content": length_rule},
+            {"role": "system", "content": enforcement_system}
         ]
 
         def generate():
@@ -1273,7 +1301,7 @@ def stream_submit_message():
                 stream_resp = openai.ChatCompletion.create(
                     model='gpt-4o-mini',
                     messages=messages,
-                    max_tokens=80,
+                    max_tokens=250,
                     temperature=0.4,
                     stream=True
                 )
@@ -1767,6 +1795,26 @@ def diagnostic_filesystem():
             'message': str(e),
             'error_type': type(e).__name__
         }), 500
+
+
+@app.route('/supabase_status')
+def supabase_status():
+    """Return basic Supabase client status for diagnostics."""
+    try:
+        url_env = os.environ.get('SUPABASE_URL') or os.environ.get('SUPABASE_DATABASE_URL')
+        key_present = bool(os.environ.get('SUPABASE_SERVICE_ROLE_KEY') or os.environ.get('SUPABASE_KEY') or os.environ.get('SUPABASE_ANON_KEY'))
+        bucket = os.environ.get('SUPABASE_BUCKET', SUPABASE_BUCKET)
+        client = init_supabase()
+        client_present = client is not None
+        return jsonify({
+            'status': 'ok',
+            'supabase_url_present': bool(url_env),
+            'supabase_key_present': key_present,
+            'supabase_client_initialized': client_present,
+            'supabase_bucket': bucket
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
 if __name__ == '__main__':
