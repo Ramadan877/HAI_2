@@ -1,4 +1,4 @@
-#Version 2
+# Version 2
 from flask import Flask, request, render_template, jsonify, session, send_from_directory, Response, stream_with_context
 from werkzeug.utils import secure_filename
 from flask_cors import CORS 
