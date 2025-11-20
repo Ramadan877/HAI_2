@@ -3013,17 +3013,14 @@ def generate_response(user_message, concept_name, golden_answer, attempt_count, 
     except Exception:
         char_ratio = 0.0
 
-    # Word-level Jaccard similarity to capture semantic overlap
+    # Word-level Jaccard similarity to capture semantic overlap (match V1)
     def _word_jaccard(a, b):
+        a_set = set(a.split())
+        b_set = set(b.split())
+        if not a_set and not b_set:
+            return 0.0
         try:
-            a_set = set(a.split())
-            b_set = set(b.split())
-            if not a_set and not b_set:
-                return 1.0
-            union = a_set.union(b_set)
-            if not union:
-                return 0.0
-            return len(a_set.intersection(b_set)) / len(union)
+            return len(a_set & b_set) / len(a_set | b_set)
         except Exception:
             return 0.0
 
@@ -3174,7 +3171,9 @@ def stream_submit_message():
             return jsonify({'status': 'error', 'message': 'Participant ID or trial type not found in session'}), 400
 
         concept_name = request.form.get('concept_name', '').strip()
-        concepts = load_concepts()
+        # concepts = load_concepts()
+        concept_list = load_concepts()
+        concepts = {c["name"]: c for c in concept_list}     # FIX
 
         concept_found = False
         for concept in concepts:
