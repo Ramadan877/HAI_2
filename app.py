@@ -49,6 +49,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 from database import db, Participant, Session, Interaction, Recording, UserEvent
 import uuid
+import supabase
 
 load_dotenv()
 
@@ -63,8 +64,10 @@ SUPABASE_BUCKET = os.environ.get('SUPABASE_BUCKET', 'uploads')
 def init_supabase():
     global supabase_client
 
+    log = logger if "logger" in globals() else None
+
     if supabase_client is not None:
-        logger.info("Supabase client already initialized.")
+        if log: log.info("Supabase client already initialized.")
         return
 
     url = (
@@ -75,22 +78,28 @@ def init_supabase():
     key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 
     if not url:
-        logger.error("Supabase init FAILED: SUPABASE_URL or SUPABASE_DATABASE_URL not set.")
+        if log: log.error("Supabase init FAILED: missing SUPABASE_URL or SUPABASE_DATABASE_URL.")
         return
 
     if not key:
-        logger.error("Supabase init FAILED: SUPABASE_SERVICE_ROLE_KEY not set.")
+        if log: log.error("Supabase init FAILED: SUPABASE_SERVICE_ROLE_KEY not set.")
         return
 
     if create_supabase_client is None:
-        logger.error("Supabase library not available.")
-        return
+        if log: log.error("Supabase library missing.")
+        return supabase_client
 
     try:
         supabase_client = create_supabase_client(url, key)
-        logger.info(f"Supabase initialized successfully with URL: {url}")
+        if log:
+            log.info(f"Supabase initialized successfully: {url}")
+        return supabase_client 
     except Exception as e:
-        logger.exception(f"Supabase init error: {e}")
+        if log:
+            log.exception(f"Supabase init error: {e}")
+        else:
+            print(f"Supabase init error: {e}")
+        return None
 
 
 def upload_file_to_supabase(local_path, dest_path=None, content_type=None):
