@@ -1,4 +1,4 @@
-# Version 2
+#Version 2
 from flask import Flask, request, render_template, jsonify, session, send_from_directory, Response, stream_with_context
 from werkzeug.utils import secure_filename
 from flask_cors import CORS 
@@ -49,10 +49,10 @@ from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 from database import db, Participant, Session, Interaction, Recording, UserEvent
 import uuid
-import supabase
 
 load_dotenv()
 
+# Optional Supabase client (used for cloud storage of audio files)
 try:
     from supabase import create_client as create_supabase_client
 except Exception:
@@ -62,69 +62,44 @@ supabase_client = None
 SUPABASE_BUCKET = os.environ.get('SUPABASE_BUCKET', 'uploads')
 
 def init_supabase():
+    """Initialize a Supabase client if SUPABASE_URL and SUPABASE keys are present."""
     global supabase_client
-
-    log = logger if "logger" in globals() else None
-
     if supabase_client is not None:
-        if log: log.info("Supabase client already initialized.")
-        return
-
-    url = (
-        os.environ.get("SUPABASE_URL")
-        or os.environ.get("SUPABASE_DATABASE_URL")
-    )
-
-    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
-
-    if not url:
-        if log: log.error("Supabase init FAILED: missing SUPABASE_URL or SUPABASE_DATABASE_URL.")
-        return
-
-    if not key:
-        if log: log.error("Supabase init FAILED: SUPABASE_SERVICE_ROLE_KEY not set.")
-        return
-
-    if create_supabase_client is None:
-        if log: log.error("Supabase library missing.")
         return supabase_client
+
+    url = os.environ.get('SUPABASE_URL')
+    key = os.environ.get('SUPABASE_SERVICE_ROLE_KEY') or os.environ.get('SUPABASE_KEY') or os.environ.get('SUPABASE_ANON_KEY')
+    if not url or not key or create_supabase_client is None:
+        supabase_client = None
+        return None
 
     try:
         supabase_client = create_supabase_client(url, key)
-        if log:
-            log.info(f"Supabase initialized successfully: {url}")
-        return supabase_client 
+        return supabase_client
     except Exception as e:
-        if log:
-            log.exception(f"Supabase init error: {e}")
-        else:
-            print(f"Supabase init error: {e}")
+        print(f"Failed to initialize Supabase client: {e}")
+        supabase_client = None
         return None
-
 
 def upload_file_to_supabase(local_path, dest_path=None, content_type=None):
     """Upload a local file to Supabase storage. Returns dict with keys 'path' and 'public_url' on success, else None."""
     try:
         client = init_supabase()
         if not client:
-            print("Supabase client not initialized; skipping upload.")
             return None
 
         bucket = os.environ.get('SUPABASE_BUCKET', SUPABASE_BUCKET)
         dest = dest_path or os.path.basename(local_path)
 
-        # Read file bytes and attempt upload. Some client versions accept bytes, others expect file-like.
         with open(local_path, 'rb') as f:
             data = f.read()
 
         try:
-            res = client.storage.from_(bucket).upload(dest, data, {'content-type': content_type} if content_type else None)
+            res = client.storage.from_(bucket).upload(dest, data)
         except TypeError:
-            # Fallback: pass file-object
             with open(local_path, 'rb') as fh:
-                res = client.storage.from_(bucket).upload(dest, fh, {'content-type': content_type} if content_type else None)
+                res = client.storage.from_(bucket).upload(dest, fh)
 
-        # Try to obtain a usable public URL across client versions
         public_url = None
         try:
             url_res = client.storage.from_(bucket).get_public_url(dest)
@@ -132,17 +107,13 @@ def upload_file_to_supabase(local_path, dest_path=None, content_type=None):
                 public_url = url_res.get('public_url') or url_res.get('publicURL') or url_res.get('publicUrl')
             elif hasattr(url_res, 'public_url'):
                 public_url = url_res.public_url
-            elif isinstance(url_res, str):
-                public_url = url_res
         except Exception:
-            # Some client responses embed url in 'data' or similar
-            try:
-                if isinstance(res, dict):
-                    public_url = res.get('publicURL') or res.get('public_url') or res.get('data', {}).get('publicURL')
-            except Exception:
-                public_url = None
+            public_url = None
 
-        print(f"Supabase upload result: local={local_path} bucket={bucket} dest={dest} public_url={public_url}")
+        try:
+            print(f"Supabase upload successful: bucket={bucket} dest={dest} public_url={public_url}")
+        except Exception:
+            pass
         return {'path': dest, 'public_url': public_url, 'raw': res}
     except Exception as e:
         print(f"Supabase upload failed: {e}")
@@ -347,9 +318,6 @@ openai.api_key = OPENAI_API_KEY
 
 app = Flask(__name__)
 CORS(app)  
-
-init_supabase()
-
 try:
     from flask_compress import Compress
     Compress(app)
@@ -1887,8 +1855,5 @@ def supabase_status():
 
 
 if __name__ == '__main__':
-    with app.app_context():
-        db.create_all()
-        init_supabase()
     port = int(os.environ.get('PORT', 5001))
     app.run(host='0.0.0.0', port=port, debug=False)
